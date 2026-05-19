@@ -1,0 +1,36 @@
+# === Ambiente Virtuale ===
+# Ignora la cartella dei pacchetti Python installati
+venv/
+.venv/
+env/
+ENV/
+
+# === Credenziali e Segreti ===
+# MAI caricare le chiavi segrete, password del DB o JWT secret su GitHub
+.env
+.env.local
+.env.*.local
+
+# === Cache di Python ===
+# File temporanei generati automaticamente da Python durante l'esecuzione
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# === File del Database Locale (Se usi SQLite per i test) ===
+# Impedisce di caricare il database di test locale se ne usi uno
+*.db
+*.sqlite3
+
+# === Configurazioni dell'IDE (Opzionale) ===
+# Ignora le cartelle create da PyCharm o VS Code
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
