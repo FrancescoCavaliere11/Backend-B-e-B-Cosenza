@@ -8,15 +8,23 @@ import json
 from backend.src.config.database_config import get_async_session
 from backend.src.data.model.user import User
 from backend.src.data.repository.room_repository import RoomRepository
+from backend.src.data.repository.room_service_repository import RoomServiceRepository
 from backend.src.data.schemas.room_schema import RoomCreateSchema
 from backend.src.service.room_service import RoomService
 from backend.src.security.authorization import is_admin_user
 
+
 room_router = APIRouter(prefix="/room", tags=["Room"])
 
+
 async def get_room_service(db: AsyncSession = Depends(get_async_session)):
-    repo = RoomRepository(db)
-    return RoomService(repo)
+    room_repo = RoomRepository(db)
+    room_service_repo = RoomServiceRepository(db)
+    return RoomService(
+        room_repository=room_repo,
+        room_service_repository=room_service_repo,
+        session=db
+    )
 
 @room_router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_room(
@@ -34,5 +42,5 @@ async def create_room(
             detail=f"I dati della stanza non sono validi: {err}"
         )
 
-    return await service.create_room(payload, images,)
+    return await service.create_room(payload=payload, images=images, current_user_id=current_user.id)
 

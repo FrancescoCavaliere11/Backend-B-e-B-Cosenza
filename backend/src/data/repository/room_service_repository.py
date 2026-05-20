@@ -1,3 +1,7 @@
+from sqlalchemy import select
+from typing import Optional, List
+from uuid import UUID
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -16,3 +20,8 @@ class RoomServiceRepository:
         except IntegrityError as e:
             await self.session.rollback()
             raise e
+
+    async def get_all_by_id(self, room_services_ids: List[UUID]) -> List[RoomService]:
+        query = select(RoomService).where(RoomService.id.in_(room_services_ids))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())

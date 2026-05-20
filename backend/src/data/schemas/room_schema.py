@@ -14,7 +14,7 @@ class RoomCreateSchema(CustomModel):
 
     price: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
 
-    room_images: List[RoomImageCreateSchema] = Field(default_factory=list)
+    room_images: List[RoomImageCreateSchema] = Field(default_factory=list, min_length=1)
 
     room_services_ids: List[UUID] = Field(default_factory=list, max_length=50)
 
