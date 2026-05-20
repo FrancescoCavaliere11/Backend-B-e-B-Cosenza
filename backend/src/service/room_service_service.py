@@ -1,10 +1,12 @@
+from typing import List
+
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 from uuid import UUID
 
 from backend.src.data.model.room_service import RoomService
 from backend.src.data.repository.room_service_repository import RoomServiceRepository
-from backend.src.data.schemas.room_service_schema import RoomServiceCreateSchema
+from backend.src.data.schemas.room_service_schema import RoomServiceCreateSchema, RoomServiceSchema
 from backend.src.security.audit_logging import apply_audit_fields
 
 class RoomServiceService:
@@ -23,3 +25,8 @@ class RoomServiceService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Esiste già un servizio con lo stesso nome"
             )
+
+    async def get_all(self) -> List[RoomServiceSchema]:
+        room_services = await self.room_service_repository.get_all()
+        room_services_schema = [RoomServiceSchema.model_validate(service) for service in room_services]
+        return room_services_schema

@@ -1,4 +1,5 @@
 from pydantic import Field, field_validator
+from uuid import UUID
 
 from backend.src.config.schemas_config import CustomModel
 from backend.src.security.validators import validate_room_services_name
@@ -10,3 +11,12 @@ class RoomServiceCreateSchema(CustomModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         return validate_room_services_name(value)
+
+
+class RoomServiceSchema(CustomModel):
+    id: UUID
+    name: str
+
+    model_config = {
+        "from_attributes": True
+    }

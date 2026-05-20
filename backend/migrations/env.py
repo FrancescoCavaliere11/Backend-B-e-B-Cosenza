@@ -9,6 +9,13 @@ from alembic import context
 
 from backend.src.config.config import settings
 from backend.src.config.database_config import Base
+from backend.src.data.model.user import User
+from backend.src.data.model.room import Room
+from backend.src.data.model.room_service import RoomService
+from backend.src.data.model.room_image import RoomImage
+from backend.src.data.model.booking import Booking
+from backend.src.data.model.room_service_association import room_service_association
+from backend.src.data.model.booking_room_association import booking_room_association
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

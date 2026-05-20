@@ -25,3 +25,8 @@ class RoomServiceRepository:
         query = select(RoomService).where(RoomService.id.in_(room_services_ids))
         result = await self.session.execute(query)
         return list(result.scalars().all())
+
+    async def get_all(self):
+        query = select(RoomService)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())

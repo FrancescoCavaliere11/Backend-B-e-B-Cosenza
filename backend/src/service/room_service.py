@@ -48,6 +48,8 @@ class RoomService:
             apply_audit_fields(audit=new_room, user_id=current_user_id, is_create=True)
             self.session.add(new_room)
 
+
+
     async def _validate_and_get_services(self, service_ids: List[UUID]) -> List[RoomServiceModel]:
         room_services = await self.room_service_repository.get_all_by_id(service_ids)
         if len(room_services) != len(service_ids):
@@ -56,6 +58,8 @@ class RoomService:
                 detail="Uno o più servizi selezionati non sono validi"
             )
         return list(room_services)
+
+
 
 
 
