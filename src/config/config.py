@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     max_file_size: int
 
+
     db_host: str
     db_port: int
     db_user: str
