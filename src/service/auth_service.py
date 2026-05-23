@@ -5,7 +5,6 @@ from src.data.repository.user_repository import UserRepository
 from src.data.model.user import User
 from src.security.password_handler import verify_dummy_password, verify_password
 from src.security.jwt_handler import create_access_token, create_refresh_token
-from src.data.schemas.auth_schema import AuthResponseSchema
 
 
 class AuthService:
@@ -28,4 +27,4 @@ class AuthService:
 
         access_token = create_access_token(user)
         refresh_token = create_refresh_token(user)
-        return AuthResponseSchema(access_token=access_token, refresh_token=refresh_token, token_type="bearer")
+        return access_token, refresh_token

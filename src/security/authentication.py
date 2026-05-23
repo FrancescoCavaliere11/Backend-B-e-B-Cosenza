@@ -1,5 +1,5 @@
-from typing import Annotated
-from fastapi import Depends, HTTPException, status
+from typing import Annotated, Optional
+from fastapi import Depends, HTTPException, status, Cookie
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,17 +13,22 @@ async def get_user_repository(db: AsyncSession = Depends(get_async_session)):
     return UserRepository(db)
 
 async def get_current_user(
-    token: Annotated[str, Depends(oauth2_schema)],
+    access_token: Annotated[Optional[str], Cookie()] = None,
     user_repository: UserRepository = Depends(get_user_repository),
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Impossibile validare le credenziali",
-        headers={"WWW-Authenticate": "Bearer"},
+        detail="Sessione scaduta o non valida",
     )
 
-    payload = decode_and_validate_access_token(token)
-    user = await user_repository.get_by_id(payload["sub"])
-    if user is None:
+    if not access_token:
         raise credentials_exception
-    return user
+
+    try:
+        payload = decode_and_validate_access_token(access_token)
+        user = await user_repository.get_by_id(payload["sub"])
+        if user is None:
+            raise credentials_exception
+        return user
+    except Exception:
+        raise credentials_exception
