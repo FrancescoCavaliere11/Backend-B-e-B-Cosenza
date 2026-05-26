@@ -13,10 +13,19 @@ class RoomServiceCreateSchema(CustomModel):
         return validate_room_services_name(value)
 
 
+class RoomServiceUpdateSchema(CustomModel):
+    id: UUID = Field()
+    name: str = Field(min_length=2, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return validate_room_services_name(value)
+
+
 class RoomServiceSchema(CustomModel):
     id: UUID
     name: str
 
-    model_config = {
-        "from_attributes": True
-    }
+    class Config:
+        from_attributes = True

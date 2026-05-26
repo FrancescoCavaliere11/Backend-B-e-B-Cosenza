@@ -1,5 +1,8 @@
+from uuid import UUID
 from pydantic import Field, EmailStr, field_validator
+
 from src.config.schemas_config import CustomModel
+from src.data.enumerators import UserRole
 from src.security.validators import validate_phone_number, validate_password_strength, validate_user_lastname, validate_user_firstname
 
 
@@ -35,4 +38,13 @@ class UserCreateSchema(CustomModel):
     def validate_password_complexity(cls, value: str):
         return validate_password_strength(value)
 
+
+class CurrentUserSchema(CustomModel):
+    id: UUID
+    email: str
+    firstname: str
+    role: UserRole
+
+    class Config:
+        from_attributes = True
 

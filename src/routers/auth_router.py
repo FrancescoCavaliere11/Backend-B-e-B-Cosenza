@@ -22,13 +22,13 @@ async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     auth_service: Annotated[AuthService, Depends(get_auth_service)]
 ):
-    access_token, refresh_token = auth_service.authenticate_user(form_data.username, form_data.password)
+    access_token, refresh_token = await auth_service.authenticate_user(form_data.username, form_data.password)
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
-        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        expires=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        max_age=settings.access_token_expire_minutes * 60,
+        expires=settings.access_token_expire_minutes * 60,
         samesite="lax",
         secure=False,  # todo Mettere TRUE in produzione quando avrò HTTPS!
         path="/"
