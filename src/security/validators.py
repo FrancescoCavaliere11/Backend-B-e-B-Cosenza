@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 import magic
 
 from fastapi import UploadFile, HTTPException, status
@@ -11,9 +11,11 @@ async def validate_image(file: UploadFile):
     await _validate_file_size(file)
     await _validate_image_type(file)
 
+
 async def _validate_image_type(file: UploadFile):
     header = await file.read(2048)
     await file.seek(0)
+
     mime = magic.from_buffer(header, mime=True)
     allowed_types = ["image/jpeg", "image/png", "image/webp"]
 
@@ -23,10 +25,15 @@ async def _validate_image_type(file: UploadFile):
             detail=f"Tipo di file non consentito. Rilevato: {mime}. Sono ammessi solo JPEG, PNG e WEBP."
         )
 
+
 async def _validate_file_size(file: UploadFile):
-    file.file.seek(0, 2)
-    file_size = file.file.tell()
-    file.file.seek(0)
+    file_size = file.size
+
+    if file_size is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Impossibile determinare la dimensione del file."
+        )
 
     if file_size > settings.max_file_size:
         raise HTTPException(
@@ -98,3 +105,13 @@ def validate_room_services_ids(value: List):
 
 def validate_room_services_name(value: str):
     return _validate_no_padding_space(value, "nome stanza")
+
+
+# Extra Service validators
+def validate_extra_service_name(value: str):
+    return _validate_no_padding_space(value, "nome servizio")
+
+def validate_extra_service_description(value: Optional[str]):
+    if value is not None:
+        return _validate_no_padding_space(value, "descrizione servizio")
+    return None

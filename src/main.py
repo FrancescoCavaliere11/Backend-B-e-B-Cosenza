@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from src.routers.extra_service_router import extra_service_router
 from src.routers.user_router import user_router
 from src.routers.auth_router import auth_router
 from src.routers.room_service_router import room_service_router
@@ -12,6 +14,7 @@ from src.data.model.room_service_association import room_service_association
 from src.data.model.booking_room_association import booking_room_association
 from src.data.model.room_service import RoomService
 from src.data.model.room_image import RoomImage
+from src.data.model.extra_service import ExtraService
 
 app = FastAPI()
 
@@ -28,3 +31,4 @@ app.include_router(user_router)
 app.include_router(auth_router)
 app.include_router(room_service_router)
 app.include_router(room_router)
+app.include_router(extra_service_router)

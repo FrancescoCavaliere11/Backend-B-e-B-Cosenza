@@ -16,6 +16,7 @@ from src.data.model.room_service_association import room_service_association
 from src.data.model.booking_room_association import booking_room_association
 from src.data.model.room_service import RoomService
 from src.data.model.room_image import RoomImage
+from src.data.model.extra_service import ExtraService
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
