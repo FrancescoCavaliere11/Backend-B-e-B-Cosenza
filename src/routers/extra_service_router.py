@@ -35,20 +35,13 @@ async def create_extra_service(
     extra_service_service: Annotated[ExtraServiceService, Depends(get_extra_service_service)],
     current_user: Annotated[User, Depends(is_admin_user)]
 ) -> ExtraServiceSchema:
-
-    try:
-        extra_service_data_json = json.loads(extra_service_form)
-        payload = ExtraServiceCreateSchema(** extra_service_data_json)
-        return await extra_service_service.create_extra_service(
-            payload=payload,
-            image=image,
-            current_user_id=current_user.id
-        )
-    except(json.JSONDecodeError, ValidationError) as err:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"I dati del servizio non sono validi: {err}"
-        )
+    extra_service_data_json = json.loads(extra_service_form)
+    payload = ExtraServiceCreateSchema(**extra_service_data_json)
+    return await extra_service_service.create_extra_service(
+        payload=payload,
+        image=image,
+        current_user_id=current_user.id
+    )
 
 
 @extra_service_router.put("/", status_code=status.HTTP_202_ACCEPTED, response_model=ExtraServiceSchema)
@@ -58,20 +51,13 @@ async def update_extra_service(
         current_user: Annotated[User, Depends(is_admin_user)],
         image: Annotated[Optional[UploadFile], File()] = None,
 ):
-    try:
-        extra_service_data_json = json.loads(extra_service_form)
-        payload = ExtraServiceUpdateSchema(** extra_service_data_json)
-        return await extra_service_service.update_extra_service(
-            payload=payload,
-            image=image,
-            current_user_id=current_user.id
-        )
-    except(json.JSONDecodeError, ValidationError) as err:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"I dati del servizio non sono validi: {err}"
-        )
-
+    extra_service_data_json = json.loads(extra_service_form)
+    payload = ExtraServiceUpdateSchema(**extra_service_data_json)
+    return await extra_service_service.update_extra_service(
+        payload=payload,
+        image=image,
+        current_user_id=current_user.id
+    )
 
 @extra_service_router.delete("/{extra_service_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_room_service(

@@ -4,6 +4,7 @@ import magic
 from fastapi import UploadFile, HTTPException, status
 
 from src.config.config import settings
+from src.exception.custom_exception import InvalidFileType
 
 
 # Image validators
@@ -20,9 +21,8 @@ async def _validate_image_type(file: UploadFile):
     allowed_types = ["image/jpeg", "image/png", "image/webp"]
 
     if mime not in allowed_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Tipo di file non consentito. Rilevato: {mime}. Sono ammessi solo JPEG, PNG e WEBP."
+        raise InvalidFileType(
+            message=f"Tipo di file non consentito. Rilevato: {mime}. Sono ammessi solo JPEG, PNG e WEBP."
         )
 
 
@@ -30,15 +30,13 @@ async def _validate_file_size(file: UploadFile):
     file_size = file.size
 
     if file_size is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Impossibile determinare la dimensione del file."
+        raise InvalidFileType(
+            message="Impossibile determinare la dimensione del file"
         )
 
     if file_size > settings.max_file_size:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Il file è troppo grande. Il limite massimo è di 5MB."
+        raise InvalidFileType(
+            message="Il file è troppo grande. Il limite massimo è di 5MB."
         )
 
 

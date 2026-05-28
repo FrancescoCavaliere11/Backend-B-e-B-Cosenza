@@ -1,3 +1,4 @@
+from dns.e164 import query
 from sqlalchemy import select
 from typing import List, Optional
 from uuid import UUID
@@ -47,7 +48,30 @@ class RoomServiceRepository:
             raise e
 
 
-    async def delete(self, room_service_id: UUID) -> bool:
+    async def exists_by_id(self, room_service_id: UUID) -> Optional[RoomService]:
+        query = select(RoomService).where(RoomService.id == room_service_id)
+        result = await self.session.execute(query)
+        return result.scalars().one_or_none()
+
+
+    async def exists_by_name_excluding_id(self, name: str, room_service_id: UUID) -> bool:
+        query = select(RoomService).where(
+            RoomService.name == name,
+            RoomService.id != room_service_id
+        )
+        result = await self.session.execute(query)
+        existing_service = result.scalar_one_or_none()
+        return existing_service is not None
+
+
+    async def exists_by_name(self, name: str) -> bool:
+        query = select(RoomService).where(RoomService.name == name)
+        result = await self.session.execute(query)
+        existing_service = result.scalar_one_or_none()
+        return existing_service is not None
+
+
+    async def delete_by_id(self, room_service_id: UUID) -> bool:
         try:
             room_service = await self.session.get(RoomService, room_service_id)
             if not room_service:
