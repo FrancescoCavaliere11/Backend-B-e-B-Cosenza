@@ -80,19 +80,6 @@ def validate_password_strength(value: str):
 def validate_room_name(value: str):
     return _validate_no_padding_space(value, "nome stanza")
 
-def validate_room_images(room_images: List["RoomImageCreateSchema"]) -> None:
-    if not room_images or len(room_images) == 0:
-        raise ValueError("La stanza deve avere almeno un'immagine.")
-
-
-    primary_count = sum(1 for img in room_images if img.is_primary)
-
-    if primary_count == 0:
-        raise ValueError("Devi impostare esattamente un'immagine come principale (is_primary=True).")
-
-    if primary_count > 1:
-        raise ValueError("Non puoi avere più di un'immagine principale per stanza.")
-
 
 # Room Service validators
 def validate_room_services_ids(value: List):

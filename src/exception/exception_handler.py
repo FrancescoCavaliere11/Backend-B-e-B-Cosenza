@@ -7,7 +7,8 @@ from pydantic import ValidationError
 from starlette import status
 from starlette.responses import JSONResponse
 
-from src.exception.custom_exception import EntityNotFound, EntityAlreadyExists, InvalidFileType, InvalidFileSize
+from src.exception.custom_exception import EntityNotFound, EntityAlreadyExists, InvalidFileType, InvalidFileSize, \
+    InvalidRoomService
 
 
 def setup_exception_handler(app: FastAPI):
@@ -74,6 +75,13 @@ def setup_exception_handler(app: FastAPI):
 
     @app.exception_handler(InvalidFileSize)
     async def invalid_file_size_handler(request: Request, exc: InvalidFileSize):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"message": exc.message},
+        )
+
+    @app.exception_handler(InvalidRoomService)
+    async def invalid_room_service_handler(request: Request, exc: InvalidRoomService):
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"message": exc.message},

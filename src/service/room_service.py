@@ -1,16 +1,15 @@
-from typing import List, Dict
+from typing import List
 from uuid import UUID
-import os
 from fastapi import UploadFile, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.model.room import Room
-from src.data.model.room_image import RoomImage
 from src.data.model.room_service import RoomService as RoomServiceModel
 from src.data.repository.room_repository import RoomRepository
 from src.data.repository.room_service_repository import RoomServiceRepository
-from src.data.schemas.room_image_schema import RoomImageCreateSchema
-from src.data.schemas.room_schema import RoomCreateSchema
+from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema
+from src.data.schemas.room_service_schema import RoomServiceSchema
+from src.exception.custom_exception import EntityAlreadyExists, InvalidRoomService
 from src.security.audit_logging import apply_audit_fields
 
 class RoomService:
@@ -25,95 +24,84 @@ class RoomService:
         self.session = session
 
 
+    async def get_all(self) -> List[RoomSchema]:
+        room_services = await self.room_repository.get_all()
+        room_services_schemas = []
+        for room_service in room_services:
+            room_data = {
+                "id": room_service.id,
+                "name": room_service.name,
+                "capacity": room_service.capacity,
+                "price": room_service.price,
+                "number": room_service.number,
+                "services": [RoomServiceSchema.model_validate(service) for service in room_services]
+            }
+
+            room_services_schema = RoomSchema.model_validate(room_data)
+            room_services_schemas.append(room_services_schema)
+
+        return room_services_schemas
+
+
     async def create_room(
             self,
             payload: RoomCreateSchema,
-            images: List[UploadFile],
+            image: UploadFile,
             current_user_id: UUID
-    ) -> None:
+    ) -> RoomSchema:
+        if self.session.in_transaction():
+            return await self._execute_create_room(payload=payload, image=image, current_user_id=current_user_id)
+
         async with self.session.begin():
-            room_services = await self._validate_and_get_services(payload.room_services_ids)
-
-            image_map = _build_image_map(images, len(payload.room_images))
-            room_images = await _process_room_images(payload.room_images, image_map, current_user_id)
-
-            new_room = Room(
-                name=payload.name,
-                capacity=payload.capacity,
-                price=payload.price,
-                room_images=room_images,
-                services=room_services
-            )
-
-            apply_audit_fields(audit=new_room, user_id=current_user_id, is_create=True)
-            self.session.add(new_room)
+            return await self._execute_create_room(payload=payload, image=image, current_user_id=current_user_id)
 
 
+
+    async def _execute_create_room(
+            self,
+            payload: RoomCreateSchema,
+            image: UploadFile,
+            current_user_id: UUID
+    ) -> RoomSchema:
+        room_services = await self._validate_and_get_services(payload.room_services_ids)
+
+        if await self.room_repository.get_by_name(payload.name) is not None:
+            raise EntityAlreadyExists("Esiste già una stanza con questo nome")
+
+        if await self.room_repository.get_by_number(payload.number) is not None:
+            raise EntityAlreadyExists("Esiste già una stanza con questo numero")
+
+        img_url = ""  # todo modificare quando implemento il servizio per caricare le immagini
+
+        new_room = Room(
+            name=payload.name,
+            capacity=payload.capacity,
+            number=payload.number,
+            price=payload.price,
+            services=room_services,
+            img_url=img_url
+        )
+
+        apply_audit_fields(audit=new_room, user_id=current_user_id, is_create=True)
+        self.session.add(new_room)
+
+        await self.session.flush()
+        await self.session.refresh(new_room)
+
+        room_data = {
+            "id": new_room.id,
+            "name": new_room.name,
+            "capacity": new_room.capacity,
+            "price": new_room.price,
+            "number": new_room.number,
+            "services": [RoomServiceSchema.model_validate(service) for service in room_services]
+        }
+
+        await self.session.commit()
+        return RoomSchema.model_validate(room_data)
 
     async def _validate_and_get_services(self, service_ids: List[UUID]) -> List[RoomServiceModel]:
         room_services = await self.room_service_repository.get_all_by_id(service_ids)
         if len(room_services) != len(service_ids):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uno o più servizi selezionati non sono validi"
-            )
+            raise InvalidRoomService("Uno o più servizi inseriti non sono validi")
         return list(room_services)
-
-
-
-
-
-
-
-
-async def _process_room_images(
-    image_schemas: List[RoomImageCreateSchema],
-    image_map: Dict[UUID, UploadFile],
-    current_user_id: UUID
-) -> List[RoomImage]:
-    room_images: List[RoomImage] = []
-    for room_image_schema in image_schemas:
-        img = image_map.get(room_image_schema.client_image_id)
-        if not img:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Corrispondenza immagine non trovata per l'ID fornito"
-            )
-
-        # TODO: Inserire la logica per salvare il file "img" su Cloudinary/S3/Disco
-        generated_url = "url di prova"
-
-        room_image = RoomImage(
-            url=generated_url,
-            is_primary=room_image_schema.is_primary,
-        )
-        apply_audit_fields(room_image, current_user_id, is_create=True)
-        room_images.append(room_image)
-    return room_images
-
-
-def _build_image_map(images: List[UploadFile], expected_count: int) -> Dict[UUID, UploadFile]:
-    if expected_count != len(images):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Il numero di immagini fornite non corrisponde ai metadati"
-        )
-
-    image_map: Dict[UUID, UploadFile] = {}
-    for img in images:
-        if not img.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uno dei file caricati non ha un nome valido"
-            )
-
-        filename_without_ext, _ = os.path.splitext(img.filename)
-        try:
-            image_id = UUID(filename_without_ext)
-            image_map[image_id] = img
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Il nome del file '{img.filename}' non contiene un UUID valido"
-            )
-    return image_map

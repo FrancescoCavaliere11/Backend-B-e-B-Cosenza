@@ -1,4 +1,3 @@
-from xml.dom.minidom import Entity
 
 
 class EntityNotFound(Exception):
@@ -18,5 +17,10 @@ class InvalidFileType(Exception):
 
 class InvalidFileSize(Exception):
     def __init__(self, message: str = "Invalid file size"):
+        self.message = message
+        super().__init__(self.message)
+
+class InvalidRoomService(Exception):
+    def __init__(self, message: str = "Invalid room service"):
         self.message = message
         super().__init__(self.message)

@@ -1,3 +1,7 @@
+from typing import Optional, List
+
+from dns.e164 import query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -16,3 +20,23 @@ class RoomRepository:
         except IntegrityError as e:
             await self.session.rollback()
             raise e
+
+
+    async def get_by_name(self, name: str) -> Optional[Room]:
+        query = select(Room).where(Room.name == name)
+        result = await self.session.execute(query)
+        room = result.scalar_one_or_none()
+        return room
+
+
+    async def get_by_number(self, number: int) -> Optional[Room]:
+        query = select(Room).where(Room.number == number)
+        result = await self.session.execute(query)
+        room = result.scalar_one_or_none()
+        return room
+
+
+    async def get_all(self) -> List[Room]:
+        query = select(Room).order_by(Room.number.asc())
+        result = await self.session.execute(query)
+        return list(result.scalars().all())

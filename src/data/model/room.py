@@ -21,9 +21,9 @@ class Room(Base, Auditable):
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     capacity: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(10,2), nullable=False)
+    number: Mapped[int] = mapped_column(SmallInteger, nullable=False, unique=True)
 
-    room_images: Mapped[List["RoomImage"]] = relationship(back_populates="room", lazy="select",
-                                                          cascade="all, delete-orphan")
+    img_url: Mapped[str] = mapped_column(Text, nullable=False, unique=False) # todo mettere unique a true
 
     services: Mapped[List["RoomService"]] = relationship(
         secondary=room_service_association,
