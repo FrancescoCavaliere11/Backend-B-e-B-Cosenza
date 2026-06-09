@@ -1,5 +1,5 @@
 from fastapi import APIRouter, status, Form, UploadFile, File, Depends
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 import json
@@ -8,7 +8,7 @@ from src.config.database_config import get_async_session
 from src.data.model.user import User
 from src.data.repository.room_repository import RoomRepository
 from src.data.repository.room_service_repository import RoomServiceRepository
-from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema
+from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema, RoomUpdateSchema
 from src.service.room_service import RoomService
 from src.security.authorization import is_admin_user
 
@@ -44,3 +44,15 @@ async def create_room(
     room_data_json = json.loads(room_form)
     payload = RoomCreateSchema(** room_data_json)
     return await service.create_room(payload=payload, image=image, current_user_id=current_user.id)
+
+
+@room_router.put("/", status_code=status.HTTP_200_OK, response_model=RoomSchema)
+async def update_room(
+    room_form: Annotated[str, Form()],
+    service: Annotated[RoomService, Depends(get_room_service)],
+    current_user: Annotated[User, Depends(is_admin_user)],
+    image: Annotated[Optional[UploadFile], File()] = None,
+) -> RoomSchema:
+    room_data_json = json.loads(room_form)
+    payload = RoomUpdateSchema(**room_data_json)
+    return await service.update_room(payload=payload, image=image, current_user_id=current_user.id)
