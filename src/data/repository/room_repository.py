@@ -79,3 +79,15 @@ class RoomRepository:
         except IntegrityError as e:
             await self.session.rollback()
             raise e
+
+    async def delete_by_id(self, room_id: UUID) -> bool:
+        try:
+            room = await self.session.get(Room, room_id)
+            if not room:
+                return False
+            await self.session.delete(room)
+            await self.session.commit()
+            return True
+        except IntegrityError as e:
+            await self.session.rollback()
+            raise e

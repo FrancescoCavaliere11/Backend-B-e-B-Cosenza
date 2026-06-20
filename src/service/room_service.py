@@ -166,3 +166,9 @@ class RoomService:
 
         await self.session.commit()
         return RoomSchema.model_validate(room_data)
+
+    async def delete_room(self, room_id: UUID) -> None:
+        # todo: quando elimino, va eliminata anche l'immagine relativa alla stanza dallo store che userò
+        room_deleted = await self.room_repository.delete_by_id(room_id)
+        if not room_deleted:
+            raise EntityNotFound("La stanza non esiste")

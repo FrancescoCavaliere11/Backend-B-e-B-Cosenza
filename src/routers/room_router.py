@@ -1,3 +1,4 @@
+from uuid import UUID
 from fastapi import APIRouter, status, Form, UploadFile, File, Depends
 from typing import Annotated, List, Optional
 
@@ -56,3 +57,12 @@ async def update_room(
     room_data_json = json.loads(room_form)
     payload = RoomUpdateSchema(**room_data_json)
     return await service.update_room(payload=payload, image=image, current_user_id=current_user.id)
+
+
+@room_router.delete("/{room_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_room(
+    room_id: UUID,
+    service: Annotated[RoomService, Depends(get_room_service)],
+    current_user: Annotated[User, Depends(is_admin_user)]
+) -> None:
+    await service.delete_room(room_id=room_id)

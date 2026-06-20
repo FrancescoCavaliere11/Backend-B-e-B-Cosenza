@@ -58,7 +58,7 @@ class ExtraServiceService:
     ):
         if image is not None:
             await validate_image(image)
-            # todo aggiornare immagine nel cloude e nel
+            # todo aggiornare immagine nel cloud e nel
 
         extra_service_data = payload.model_dump()
         updated_extra_service = ExtraService(**extra_service_data)
@@ -81,7 +81,7 @@ class ExtraServiceService:
 
     async def delete_extra_service(self, extra_service_id: UUID) -> None:
         extra_service = await self.extra_service_repository.delete_by_id(extra_service_id)
-        # todo eliminare l'immagine del cloude
+        # todo eliminare l'immagine del cloude e usare eventualmente le tansazioni
         if not extra_service:
             raise EntityNotFound(message="Il servizio non esiste")
 
