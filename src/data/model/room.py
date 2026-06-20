@@ -2,7 +2,7 @@ from src.config.database_config import Base
 import uuid
 from typing import List
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Numeric, SmallInteger, Text, UUID
+from sqlalchemy import Numeric, SmallInteger, Text, UUID, Boolean
 from decimal import Decimal
 from src.data.model.room_service_association import room_service_association
 from src.data.model.booking_room_association import booking_room_association
@@ -22,6 +22,7 @@ class Room(Base, Auditable):
     capacity: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(10,2), nullable=False)
     number: Mapped[int] = mapped_column(SmallInteger, nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true", default=True)
 
     img_url: Mapped[str] = mapped_column(Text, nullable=False, unique=False) # todo mettere unique a true
 

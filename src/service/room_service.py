@@ -35,6 +35,7 @@ class RoomService:
                 "capacity": room.capacity,
                 "price": room.price,
                 "number": room.number,
+                "enabled": room.enabled,
                 "services": [RoomServiceSchema.model_validate(service) for service in room.services]
             }
 
@@ -81,7 +82,8 @@ class RoomService:
             number=payload.number,
             price=payload.price,
             services=room_services,
-            img_url=img_url
+            img_url=img_url,
+            enabled=payload.enabled
         )
 
         apply_audit_fields(audit=new_room, user_id=current_user_id, is_create=True)
@@ -96,6 +98,7 @@ class RoomService:
             "capacity": new_room.capacity,
             "price": new_room.price,
             "number": new_room.number,
+            "enabled": new_room.enabled,
             "services": [RoomServiceSchema.model_validate(service) for service in room_services]
         }
 
@@ -145,6 +148,7 @@ class RoomService:
         room.number = payload.number
         room.price = payload.price
         room.services = room_services
+        room.enabled = payload.enabled
 
         if image is not None:
             await validate_image(image)
@@ -161,6 +165,7 @@ class RoomService:
             "capacity": room.capacity,
             "price": room.price,
             "number": room.number,
+            "enabled": room.enabled,
             "services": [RoomServiceSchema.model_validate(service) for service in room_services]
         }
 

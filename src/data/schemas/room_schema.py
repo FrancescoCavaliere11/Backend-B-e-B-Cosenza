@@ -18,6 +18,8 @@ class RoomCreateSchema(CustomModel):
 
     number: int = Field(gt=0, le=1000)
 
+    enabled: bool = Field(default=True)
+
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str):
@@ -36,6 +38,7 @@ class RoomUpdateSchema(CustomModel):
     price: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
     room_services_ids: List[UUID] = Field(default_factory=list, max_length=50)
     number: int = Field(gt=0, le=1000)
+    enabled: bool = Field(default=True)
 
     @field_validator("name")
     @classmethod
@@ -54,6 +57,7 @@ class RoomSchema(CustomModel):
     capacity: int
     price: Decimal
     number: int
+    enabled: bool
     services: List[RoomServiceSchema]
 
     class Config:
