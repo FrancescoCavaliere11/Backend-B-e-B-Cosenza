@@ -40,6 +40,7 @@ httpx==0.28.1
 idna==3.15
 importlib_metadata==8.7.1
 importlib_resources==6.5.2
+iniconfig==2.1.0
 ipykernel==6.31.0
 ipython==8.18.1
 isoduration==20.11.0
@@ -80,6 +81,7 @@ passlib==1.7.4
 pexpect==4.9.0
 pillow==11.3.0
 platformdirs==4.4.0
+pluggy==1.6.0
 prometheus_client==0.25.0
 prompt_toolkit==3.0.52
 psutil==7.2.2
@@ -93,9 +95,11 @@ pydantic_core==2.46.4
 Pygments==2.20.0
 PyJWT==2.12.1
 pyparsing==3.3.2
+pytest==8.4.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 python-json-logger==4.0.0
+python-magic==0.4.27
 python-multipart==0.0.20
 pytz==2026.2
 PyYAML==6.0.3
@@ -129,5 +133,3 @@ webcolors==24.11.1
 webencodings==0.5.1
 websocket-client==1.9.0
 zipp==3.23.1
-
-python-magic

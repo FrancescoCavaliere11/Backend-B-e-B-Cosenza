@@ -1,6 +1,7 @@
 from typing import List, Optional
 from uuid import UUID
 from fastapi import UploadFile, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.model.room import Room
@@ -9,7 +10,7 @@ from src.data.repository.room_repository import RoomRepository
 from src.data.repository.room_service_repository import RoomServiceRepository
 from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema, RoomUpdateSchema
 from src.data.schemas.room_service_schema import RoomServiceSchema
-from src.exception.custom_exception import EntityAlreadyExists, InvalidRoomService, EntityNotFound
+from src.exception.custom_exception import EntityAlreadyExists, EntityInUse, InvalidRoomService, EntityNotFound
 from src.security.audit_logging import apply_audit_fields
 from src.security.validators import validate_image
 
@@ -174,6 +175,17 @@ class RoomService:
 
     async def delete_room(self, room_id: UUID) -> None:
         # todo: quando elimino, va eliminata anche l'immagine relativa alla stanza dallo store che userò
-        room_deleted = await self.room_repository.delete_by_id(room_id)
+        try:
+            room_deleted = await self.room_repository.delete_by_id(room_id)
+        except IntegrityError as error:
+            # La foreign key `booking_room_items.room_id` è ON DELETE RESTRICT:
+            # una camera con prenotazioni associate non è cancellabile, perché
+            # eliminarla distruggerebbe lo storico contabile di quei soggiorni.
+            # Prima dello Step A questo caso produceva un 500.
+            raise EntityInUse(
+                "La camera ha prenotazioni associate e non può essere eliminata. "
+                "Per toglierla dalla vendita, impostala come non disponibile."
+            ) from error
+
         if not room_deleted:
             raise EntityNotFound("La stanza non esiste")
