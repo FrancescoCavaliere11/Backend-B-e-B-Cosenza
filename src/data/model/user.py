@@ -24,5 +24,17 @@ class User(Base, Auditable):
     password: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), nullable=False)
 
-    bookings: Mapped[List["Booking"]] = relationship(back_populates="user", lazy="select", cascade="all, delete-orphan")
-
+    # MODIFICA (Booking Module - Step A):
+    # Rimosso `cascade="all, delete-orphan"`. La cancellazione di un utente NON
+    # deve distruggere lo storico delle prenotazioni: sono documenti con
+    # rilevanza contabile e fiscale, e conservano già uno snapshot anagrafico
+    # autonomo (`Booking.guest_*`).
+    # La foreign key è ora `ON DELETE SET NULL`: il booking sopravvive,
+    # "orfano" dell'account ma integro nei suoi dati. `passive_deletes=True`
+    # delega l'operazione al database invece di farla eseguire all'ORM riga
+    # per riga.
+    bookings: Mapped[List["Booking"]] = relationship(
+        back_populates="user",
+        lazy="select",
+        passive_deletes=True,
+    )

@@ -9,13 +9,22 @@ from alembic import context
 
 from src.config.config import settings
 from src.config.database_config import Base
+
+# Import dei modelli: servono a popolare Base.metadata per l'autogenerate.
 from src.data.model.user import User
 from src.data.model.room import Room
 from src.data.model.booking import Booking
 from src.data.model.room_service_association import room_service_association
-from src.data.model.booking_room_association import booking_room_association
 from src.data.model.room_service import RoomService
 from src.data.model.extra_service import ExtraService
+
+# MODIFICA (Booking Module - Step A):
+# `booking_room_association` è stata sostituita dall'association object
+# `BookingRoomItem`; le nuove entità del modulo vanno registrate qui.
+from src.data.model.booking_room_item import BookingRoomItem
+from src.data.model.booking_token import BookingToken
+from src.data.model.booking_status_history import BookingStatusHistory
+from src.data.model.stripe_event import StripeEvent
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -35,14 +44,7 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
 
 
 def run_migrations_offline() -> None:
