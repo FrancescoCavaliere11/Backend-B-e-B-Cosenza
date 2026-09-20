@@ -23,11 +23,12 @@ from datetime import date
 from typing import Annotated, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.config import settings
 from src.config.database_config import get_async_session
+from src.data.enumerators import BookingStatus
 from src.data.model.user import User
 from src.data.repository.booking_repository import BookingRepository
 from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
@@ -60,6 +61,7 @@ from src.security.rate_limiter import (
 )
 from src.service.availability_service import AvailabilityService
 from src.service.booking_service import BookingCreationResult, BookingService
+from src.service.email.email_service import get_email_service
 from src.service.pricing_service import PricingService
 
 booking_router = APIRouter(prefix="/api/v1/bookings", tags=["Booking"])
@@ -111,12 +113,59 @@ def _to_created_response(result: BookingCreationResult) -> BookingCreatedSchema:
     """
     Compone la risposta di creazione.
 
-    Il token di conferma viene esposto **solo se l'invio email è disattivato**,
-    così il flusso resta collaudabile finché l'`EmailService` non esiste
-    (Step F). Attivando `email_enabled` il campo si spegne da sé.
+    Il token di conferma viene esposto **solo se l'invio email è disattivato**.
+    Con `email_enabled` attivo il campo si spegne da sé e il token viaggia
+    unicamente nel link dell'email.
     """
     token = result.confirmation_token if not settings.email_enabled else None
     return BookingCreatedSchema(booking=result.booking, confirmation_token=token)
+
+
+def schedule_creation_email(
+        background: BackgroundTasks,
+        result: BookingCreationResult
+) -> None:
+    """
+    Accoda l'email che segue una creazione.
+
+    **Perché `BackgroundTasks` e non una chiamata diretta.** Spedire dentro la
+    transazione sbaglia in entrambe le direzioni: se la mail parte e poi la
+    transazione fa rollback, l'ospite riceve la conferma di una prenotazione
+    che non esiste; se invece si sollevasse per un errore SMTP, si perderebbe
+    anche la prenotazione. `BackgroundTasks` esegue dopo che la risposta è
+    stata prodotta, quindi dopo il commit di `_in_transaction` — per
+    costruzione, non per fortuna.
+
+    Il `BookingService` resta così logica di dominio pura e non sa nulla di
+    SMTP, coerentemente con la decisione #20: l'invio è un fatto di canale.
+
+    ⚠️ Non è un outbox pattern: se il processo muore fra il commit e l'invio,
+    quella email è persa e nessuno se ne accorge. È un debito accettato
+    consapevolmente, perché ogni messaggio di questo modulo è ricostruibile a
+    mano dal back-office.
+    """
+    email_service = get_email_service()
+
+    if result.confirmation_token:
+        background.add_task(
+            email_service.send_booking_pending,
+            result.booking,
+            result.confirmation_token,
+        )
+    elif result.booking.status == BookingStatus.CONFIRMED:
+        # Nasce già confermata: pagamento online andato a buon fine, o
+        # prenotazione presa al telefono. L'ospite riceve subito il riepilogo,
+        # con il link di gestione.
+        background.add_task(
+            email_service.send_booking_confirmed,
+            result.booking,
+            result.manage_token,
+        )
+    # Resta il caso `PENDING_PAYMENT`: nessuna email, ed è voluto. L'ospite è
+    # ancora sulla pagina di pagamento e non c'è niente da dirgli — annunciargli
+    # una prenotazione che il pagamento potrebbe far fallire sarebbe peggio del
+    # silenzio. La notifica parte quando il webhook Stripe conferma l'incasso
+    # (Step G).
 
 
 # --------------------------------------------------------------------------- #
@@ -176,12 +225,14 @@ async def create_quote(
 async def create_guest_booking(
         payload: GuestBookingCreateSchema,
         request: Request,
+        background: BackgroundTasks,
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingCreatedSchema:
     await enforce_email_rate_limit(str(payload.guest.email))
     await verify_captcha(payload.captcha_token, client_ip(request))
 
     result = await service.create_guest_booking(payload)
+    schedule_creation_email(background, result)
     return _to_created_response(result)
 
 
@@ -193,9 +244,23 @@ async def create_guest_booking(
 )
 async def confirm_booking(
         payload: BookingConfirmSchema,
+        background: BackgroundTasks,
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingPublicSchema:
-    return await service.confirm_booking(payload.token)
+    """
+    La conferma emette anche il **token di gestione**, che viaggia nell'email
+    di riepilogo: per un ospite non registrato è l'unico modo di annullare in
+    autonomia, perché non ha un account e la consultazione con codice ed email
+    è in sola lettura.
+    """
+    result = await service.confirm_booking(payload.token)
+
+    background.add_task(
+        get_email_service().send_booking_confirmed,
+        result.booking,
+        result.manage_token,
+    )
+    return result.booking
 
 
 @booking_router.post(
@@ -206,9 +271,19 @@ async def confirm_booking(
 )
 async def cancel_booking(
         payload: BookingCancelSchema,
+        background: BackgroundTasks,
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingPublicSchema:
-    return await service.cancel_by_token(payload.token, payload.reason)
+    """
+    Il token accettato qui è quello di **gestione**, recapitato con l'email di
+    conferma. Fino allo Step F nessun percorso di codice lo emetteva: questo
+    endpoint esisteva, ma nessun client poteva procurarsi la credenziale che
+    richiede.
+    """
+    booking = await service.cancel_by_token(payload.token, payload.reason)
+
+    background.add_task(get_email_service().send_booking_cancelled, booking)
+    return booking
 
 
 @booking_router.post(
@@ -254,6 +329,7 @@ async def get_my_bookings(
 )
 async def create_user_booking(
         payload: UserBookingCreateSchema,
+        background: BackgroundTasks,
         current_user: Annotated[User, Depends(get_current_user)],
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingCreatedSchema:
@@ -262,6 +338,7 @@ async def create_user_booking(
     barriera contro l'automazione, e l'anagrafica viene copiata dal profilo.
     """
     result = await service.create_user_booking(payload, current_user)
+    schedule_creation_email(background, result)
     return _to_created_response(result)
 
 
@@ -273,6 +350,7 @@ async def create_user_booking(
 async def cancel_my_booking(
         code: str,
         payload: OwnBookingCancelSchema,
+        background: BackgroundTasks,
         current_user: Annotated[User, Depends(get_current_user)],
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingPublicSchema:
@@ -286,4 +364,7 @@ async def cancel_my_booking(
     i due casi confermerebbe l'esistenza del codice e consentirebbe di sondare
     le prenotazioni altrui.
     """
-    return await service.cancel_own_booking(code, current_user, payload.reason)
+    booking = await service.cancel_own_booking(code, current_user, payload.reason)
+
+    background.add_task(get_email_service().send_booking_cancelled, booking)
+    return booking

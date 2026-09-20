@@ -1,0 +1,32 @@
+{% extends "_base.html" %}
+
+{% block body %}
+<p style="margin:0 0 14px; font-size:15px;">
+  la tua prenotazione è stata <strong>annullata</strong>. Le camere sono
+  tornate disponibili e non ti aspettiamo più per le date indicate qui sotto.
+</p>
+
+{% if booking.payment_option.value == "PAY_NOW" %}
+<p style="margin:0 0 14px; font-size:15px;">
+  Per quanto riguarda l'importo già pagato, ti contatteremo separatamente.
+</p>
+{% endif %}
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:16px 0 8px;">
+  <tr>
+    <td style="border:1.5px solid #1f4e79; border-radius:5px;">
+      <a href="{{ booking_url }}"
+         style="display:inline-block; padding:11px 24px; color:#1f4e79;
+                text-decoration:none; font-size:14.5px; font-weight:600;">
+        Prenota un nuovo soggiorno
+      </a>
+    </td>
+  </tr>
+</table>
+{% endblock %}
+
+{% block footer_note %}
+<p style="margin:18px 0 0; font-size:13px; color:#5c6370;">
+  Non sei stato tu ad annullare? Scrivici: ricostruiamo insieme cosa è successo.
+</p>
+{% endblock %}

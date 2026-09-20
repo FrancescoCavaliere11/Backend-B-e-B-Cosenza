@@ -11,11 +11,11 @@ divergerebbero alla prima dipendenza aggiunta.
 Come nel router pubblico, nessun `try/except`: le eccezioni di dominio sono
 tutte `AppException` e vengono tradotte dall'handler globale.
 """
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 
 from src.data.enumerators import BookingStatus
 from src.data.model.user import User
@@ -29,10 +29,13 @@ from src.data.schemas.booking_schema import (
     BookingSearchFiltersSchema,
     BookingStatusUpdateSchema,
     PaginatedBookingsSchema,
+    SweepResultSchema,
 )
-from src.routers.booking_router import get_booking_service
+from src.routers.booking_router import schedule_creation_email, get_booking_service
 from src.security.authorization import is_admin_user
+from src.service.booking_expiration_service import dispatch_expiration_notices
 from src.service.booking_service import BookingService
+from src.service.email.email_service import get_email_service
 
 admin_booking_router = APIRouter(
     prefix="/api/v1/admin/bookings",
@@ -125,6 +128,7 @@ async def get_booking(
 )
 async def create_booking(
         payload: AdminBookingCreateSchema,
+        background: BackgroundTasks,
         current_user: Annotated[User, Depends(is_admin_user)],
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> AdminBookingCreatedSchema:
@@ -133,9 +137,10 @@ async def create_booking(
     inserito a mano (`guest`), mai entrambi.
 
     Con `skip_email_confirmation` attivo — il default — la prenotazione nasce
-    già `CONFIRMED` e non viene emesso alcun token: è il caso della
-    prenotazione telefonica, dove l'identità è già stata verificata parlando
-    con l'ospite. Disattivandolo si ottiene il flusso normale con conferma via
+    già `CONFIRMED`: è il caso della prenotazione telefonica, dove l'identità è
+    già stata verificata parlando con l'ospite. Non c'è nulla da confermare,
+    quindi all'ospite arriva direttamente il riepilogo, con il link di
+    gestione. Disattivandolo si ottiene il flusso normale con conferma via
     email, e il token viene restituito secondo le stesse regole del canale
     pubblico.
 
@@ -143,6 +148,13 @@ async def create_booking(
     un attore fidato e il prezzo viene calcolato direttamente dal server.
     """
     result = await service.create_admin_booking(payload, current_user.id)
+
+    # Stesso instradamento del canale pubblico: se c'è un token di conferma
+    # parte l'invito a confermare, altrimenti il riepilogo di prenotazione
+    # confermata. Una prenotazione presa al telefono resta comunque una
+    # prenotazione di cui l'ospite deve avere traccia scritta.
+    schedule_creation_email(background, result)
+
     return AdminBookingCreatedSchema(
         booking=result.booking, confirmation_token=result.confirmation_token
     )
@@ -170,6 +182,14 @@ async def update_booking(
     Se cambiano date o camere il prezzo viene ricalcolato e le righe camera
     ricostruite. Lo spostamento su uno slot già occupato risponde `409`.
     Una prenotazione in stato terminale non è modificabile.
+
+    TODO [email di modifica]: questo endpoint **non** avvisa l'ospite, a
+      differenza dell'annullamento. Non è una dimenticanza: un messaggio di
+      modifica deve dire *cosa* è cambiato rispetto a prima e se l'ospite debba
+      fare qualcosa, e richiede quindi il confronto fra stato precedente e
+      successivo — un lavoro a sé, non una riga in coda a questa funzione. Fino
+      ad allora la comunicazione resta a carico di chi opera al banco, che
+      comunque sta già parlando con l'ospite al telefono.
     """
     return await service.admin_update_booking(booking_id, payload, current_user.id)
 
@@ -182,6 +202,7 @@ async def update_booking(
 async def change_status(
         booking_id: UUID,
         payload: BookingStatusUpdateSchema,
+        background: BackgroundTasks,
         current_user: Annotated[User, Depends(is_admin_user)],
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingSchema:
@@ -195,8 +216,19 @@ async def change_status(
     più comuni del back-office.
 
     La motivazione è obbligatoria per l'annullamento.
+
+    **L'annullamento avvisa l'ospite.** È l'unica transizione che genera una
+    email: le altre riguardano il funzionamento interno della struttura
+    (arrivo, partenza, mancata presentazione) e l'ospite le conosce già perché
+    era presente. Un annullamento deciso al banco, invece, lui potrebbe non
+    saperlo affatto.
     """
-    return await service.admin_change_status(booking_id, payload, current_user.id)
+    booking = await service.admin_change_status(booking_id, payload, current_user.id)
+
+    if booking.status == BookingStatus.CANCELLED:
+        background.add_task(get_email_service().send_booking_cancelled, booking)
+
+    return booking
 
 
 @admin_booking_router.post(
@@ -238,3 +270,40 @@ async def extend_hold(
     blocco non si può riattivare su uno slot ormai occupato.
     """
     return await service.admin_extend_hold(booking_id, payload, current_user.id)
+
+
+# --------------------------------------------------------------------------- #
+# Manutenzione                                                                 #
+# --------------------------------------------------------------------------- #
+
+@admin_booking_router.post(
+    "/sweep-expired",
+    response_model=SweepResultSchema,
+    summary="Esegue subito lo sweeper delle prenotazioni scadute",
+)
+async def sweep_expired(
+        service: Annotated[BookingService, Depends(get_booking_service)],
+) -> SweepResultSchema:
+    """
+    Porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto, senza
+    attendere il giro automatico.
+
+    Serve a due cose: collaudare il meccanismo senza stare quindici minuti a
+    guardare l'orologio, e avere una leva operativa quando lo sweeper in
+    background è disattivato (`sweeper_enabled = false`) perché si preferisce
+    pilotarlo da uno scheduler esterno.
+
+    Non è un'operazione distruttiva né rischiosa: libera slot che il sistema
+    considera già liberi. Eseguirla due volte di fila non cambia nulla, perché
+    la seconda passata non trova più prenotazioni in attesa scadute.
+
+    Le email partono **dopo** il commit, come nel giro automatico.
+    """
+    notices = await service.expire_pending()
+    notified = await dispatch_expiration_notices(notices, get_email_service())
+
+    return SweepResultSchema(
+        expired_count=len(notices),
+        notified_count=notified,
+        swept_at=datetime.now(timezone.utc),
+    )

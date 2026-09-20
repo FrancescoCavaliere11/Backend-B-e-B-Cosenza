@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → E
+Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → F
 
 ---
 
@@ -247,6 +247,49 @@ Correzione importante introdotta allo Step B: gli errori di validazione producev
 
 ---
 
+### 3.8 Email transazionali
+
+Quattro messaggi, ciascuno in versione HTML e testo semplice.
+
+| Template | Quando parte | Cosa contiene |
+|:--|:--|:--|
+| `booking_pending` | Creazione con conferma richiesta | Link di conferma, scadenza del blocco |
+| `booking_confirmed` | Conferma, o creazione già confermata | Riepilogo, **link di gestione**, termine gratuito |
+| `booking_cancelled` | Annullamento, dall'ospite o dal back-office | Riepilogo, eventuale penale |
+| `booking_expired` | Sweeper | Avviso, invito a riprenotare |
+
+**I link puntano alla SPA, non al backend**: `{FRONTEND_BASE_URL}/prenotazione/conferma?token=...` e `/prenotazione/gestisci?token=...`. Il frontend legge il token dalla query string e lo inoltra nel **body di una POST** al backend. Il token non deve mai comparire in un URL del backend, dove finirebbe negli access log e nell'header `Referer`.
+
+**L'invio avviene dopo il commit**, tramite `BackgroundTasks`. Non è un dettaglio implementativo: spedire dentro la transazione significherebbe, in caso di rollback, annunciare all'ospite una prenotazione che non esiste — e quella email non si richiama indietro.
+
+**Un invio fallito non fa fallire la richiesta.** Se il server SMTP è irraggiungibile la prenotazione resta valida e l'evento finisce nei log. Stessa logica del captcha: rifiutare prenotazioni durante un disservizio di terze parti costerebbe incassi veri.
+
+**Nei log** finiscono codice prenotazione, template, esito e destinatario mascherato (`m***@example.com`). **Non** il token, **non** il corpo del messaggio, **non** l'indirizzo completo.
+
+**Escaping.** I template HTML hanno l'autoescape attivo. Il nome dell'ospite arriva da un form pubblico e finisce in un messaggio spedito con il mittente della struttura: senza escaping, chiunque potrebbe iniettare markup e link in una email che *sembra* del B&B.
+
+**Con `EMAIL_ENABLED=false`** i messaggi vengono scritti nei log invece che spediti, link compreso. Perché siano visibili serve che i log applicativi abbiano una destinazione: `configure_logging()` in `main.py` attacca un handler al sottoalbero `src`. Senza, uvicorn configura solo i propri logger e ogni riga del progetto viene scartata in silenzio — il canale console sembrerebbe non funzionare. È l'unico punto del sistema in cui un token in chiaro finisce in un log, ed è attivo esattamente quando le email sono spente, cioè in sviluppo.
+
+**Nessuna email su `PENDING_PAYMENT`.** Una prenotazione `PAY_NOW` nasce in attesa di incasso: l'ospite è ancora sulla pagina di pagamento e non c'è nulla da comunicargli. La notifica parte quando il webhook Stripe conferma (Step G).
+
+---
+
+### 3.9 Sweeper delle scadenze
+
+Porta a `EXPIRED` le prenotazioni temporanee il cui blocco e scaduto. Parte con l'applicazione (`lifespan`) e gira ogni `SWEEPER_INTERVAL_SECONDS` su lotti di `SWEEPER_BATCH_SIZE`.
+
+**È l'unico proprietario della transizione a `EXPIRED`.** In nessun altro punto del codice una prenotazione diventa `EXPIRED`.
+
+**Il sistema resta corretto anche se non gira.** Gli slot tornano prenotabili per altre due vie: le query di disponibilità scartano i pending con blocco scaduto, e la *just-in-time expiration* disattiva le righe camera durante la creazione successiva sulle stesse date. Senza sweeper mancano la pulizia degli stati e l'avviso all'ospite, non la correttezza.
+
+**Con più worker uvicorn** ne parte uno per processo. Le passate si dividono il lavoro grazie a `FOR UPDATE ... SKIP LOCKED`: chi arriva secondo salta le righe già prese in carico invece di aspettarle.
+
+**Arretrati.** Se lo sweeper resta fermo a lungo, al riavvio sistema tutti gli stati ma **avvisa solo** le scadenze più recenti di `SWEEPER_NOTIFY_MAX_AGE_HOURS` (default 24). Spedire centinaia di email su richieste dimenticate da giorni è un modo efficace per farsi segnalare come spam.
+
+**Disattivabile** con `SWEEPER_ENABLED=false`, per pilotarlo da uno scheduler esterno tramite l'endpoint 17.
+
+---
+
 ## 4. Endpoint
 
 ### 4.1 Prospetto
@@ -274,6 +317,7 @@ Correzione importante introdotta allo Step B: gli errori di validazione producev
 | 14 | `POST` | `/{booking_id}/status` | Transizione di stato |
 | 15 | `POST` | `/{booking_id}/payment` | Registrazione incasso manuale |
 | 16 | `POST` | `/{booking_id}/extend-hold` | Proroga del blocco temporaneo |
+| 17 | `POST` | `/sweep-expired` | Esecuzione immediata dello sweeper delle scadenze |
 
 ---
 
@@ -378,9 +422,11 @@ curl -i -X POST http://localhost:8000/api/v1/bookings/quote \
 | `PAY_ON_ARRIVAL` | `PENDING_CONFIRMATION` | sì |
 | `PAY_NOW` | `PENDING_PAYMENT` | no — il pagamento è la verifica d'identità |
 
-Lo slot resta bloccato **15 minuti** (`hold_expires_at`). Scaduto quel termine senza conferma, torna prenotabile.
+Lo slot resta bloccato **15 minuti** (`hold_expires_at`). Scaduto quel termine senza conferma, torna prenotabile e lo sweeper porta la prenotazione a `EXPIRED`.
 
-**Test**: `test_flusso_completo_...`, `test_slot_occupato_risponde_409`, `test_honeypot_compilato_rifiutato`, `test_condizioni_non_accettate_rifiutate`, `test_token_di_conferma_non_esposto_con_email_attiva`, più i 14 test di `test_booking_service.py` fra cui **`test_due_prenotazioni_concorrenti_una_sola_vince`**, ripetuto 10 volte.
+**Email**: `booking_pending` con `PAY_ON_ARRIVAL`. Con `PAY_NOW` **nessuna email**: l'ospite è ancora sulla pagina di pagamento e la notifica parte dal webhook Stripe (Step G).
+
+**Test**: `test_flusso_completo_...`, `test_slot_occupato_risponde_409`, `test_la_creazione_manda_una_sola_email_di_conferma`, `test_il_pagamento_online_non_manda_ancora_nulla`, `test_un_canale_email_guasto_non_impedisce_la_prenotazione`, `test_honeypot_compilato_rifiutato`, `test_condizioni_non_accettate_rifiutate`, `test_token_di_conferma_non_esposto_con_email_attiva`, più i 14 test di `test_booking_service.py` fra cui **`test_due_prenotazioni_concorrenti_una_sola_vince`**, ripetuto 10 volte.
 
 ```bash
 curl -i -X POST http://localhost:8000/api/v1/bookings/ \
@@ -410,9 +456,13 @@ curl -i -X POST http://localhost:8000/api/v1/bookings/ \
 
 **Doppio clic sul link**: se il token è già speso e la prenotazione è `CONFIRMED`, la risposta è `409` con *"La prenotazione è già stata confermata"* — distinto dal generico "link non valido", per non far dubitare l'ospite che la conferma sia andata a buon fine.
 
-**Blocco scaduto**: `410`. Lo stato resta `PENDING_CONFIRMATION` finché non passa lo sweeper (Step F); lo slot è comunque già tornato prenotabile.
+**Blocco scaduto**: `410`. Lo stato resta `PENDING_CONFIRMATION` finché non passa lo sweeper; lo slot è comunque già tornato prenotabile.
 
-**Test**: `test_flusso_completo_...`, `test_doppia_conferma_risponde_409`, `test_conferma_completa_il_ciclo`, `test_doppia_conferma_segnalata`, `test_conferma_dopo_la_scadenza_rifiutata`.
+**Emette il token di gestione.** Alla conferma viene creato un token `MANAGE`, valido fino alla data di partenza, che viaggia nel link dell'email di riepilogo. Per un ospite non registrato è **l'unico modo di annullare in autonomia**: non ha un account, e il `lookup` è in sola lettura.
+
+**Email**: `booking_confirmed`, con il link di gestione.
+
+**Test**: `test_flusso_completo_...`, `test_doppia_conferma_risponde_409`, `test_conferma_completa_il_ciclo`, `test_doppia_conferma_segnalata`, `test_conferma_dopo_la_scadenza_rifiutata`, `test_la_conferma_manda_il_riepilogo_con_il_link_di_gestione`.
 
 ```bash
 curl -i -X POST http://localhost:8000/api/v1/bookings/confirm \
@@ -444,9 +494,15 @@ curl -i -X POST http://localhost:8000/api/v1/bookings/confirm \
 | `CONFIRMED` + `PAY_NOW` | `409` — non rimborsabile, invito a contattare la struttura |
 | Stato terminale | `409` |
 
-Alla cancellazione lo slot torna **immediatamente** prenotabile.
+Alla cancellazione lo slot torna **immediatamente** prenotabile, e il token viene speso: un secondo tentativo con lo stesso link risponde `400`.
 
-**Test**: `test_slot_liberato_dopo_la_cancellazione`.
+**Da dove arriva il token.** È il `MANAGE` emesso alla conferma (endpoint 4) o alla creazione di una prenotazione che nasce già confermata (endpoint 12). Arriva all'ospite nel link *"Gestisci o annulla la prenotazione"* dell'email di riepilogo.
+
+> ⚠️ **Fino allo Step F questo endpoint era irraggiungibile.** Cercava un token `CANCEL` o `MANAGE`, ma nessun percorso di codice ne emetteva uno: la rotta era scritta, testata a livello di servizio e documentata, e nessun client poteva procurarsi la credenziale richiesta. Il difetto è sopravvissuto perché i test del servizio costruivano il token a mano — cosa che un ospite non può fare. Vedi §8bis.11.3.
+
+**Email**: `booking_cancelled`.
+
+**Test**: `test_slot_liberato_dopo_la_cancellazione`, `test_il_link_ricevuto_per_email_permette_davvero_di_annullare`, `test_il_link_di_gestione_si_spende_una_volta_sola`, `test_l_annullamento_avvisa_l_ospite`.
 
 ---
 
@@ -607,6 +663,8 @@ Sono consentite **date nel passato**, per registrare a posteriori un walk-in o c
 
 > ⚠️ **Frontend**: quando la data di arrivo è precedente a oggi, mostrare un dialog di conferma esplicito prima di inviare. Il backend lo consente di proposito, quindi l'unica difesa contro il refuso di digitazione è quell'avviso.
 
+**Email**: `booking_confirmed` con il link di gestione quando nasce già confermata, `booking_pending` quando `skip_email_confirmation` è disattivato. Una prenotazione presa al telefono resta una prenotazione di cui l'ospite deve avere traccia scritta.
+
 **Test**: l'intera classe `TestCreate` (7 test).
 
 ---
@@ -636,6 +694,8 @@ L'esclusione al punto 3 non è un dettaglio: senza, una prenotazione che si allu
 
 **L'opzione di pagamento non è modificabile** qui: cambiarla altererebbe prezzo, politica di cancellazione e stato dell'incasso insieme. Se serve, si annulla e si ricrea.
 
+> **Nessuna email.** A differenza dell'annullamento, la modifica non avvisa l'ospite. Non è una dimenticanza: un messaggio di modifica deve dire *cosa* è cambiato rispetto a prima e se l'ospite debba fare qualcosa, e richiede il confronto fra stato precedente e successivo — un intervento a sé. Fino ad allora la comunicazione resta a chi opera al banco, che comunque sta già parlando con l'ospite.
+
 **Test**: l'intera classe `TestUpdate` (8 test), fra cui `test_version_obsoleto_rifiutato` e `test_allungamento_di_un_giorno_non_collide_con_se_stessa`.
 
 ---
@@ -661,6 +721,8 @@ L'esclusione al punto 3 non è un dettaglio: senza, una prenotazione che si allu
 | → `COMPLETED` | non prima della data di partenza |
 
 L'annullamento libera **immediatamente** lo slot.
+
+**Email**: solo l'annullamento genera un messaggio (`booking_cancelled`). Le altre transizioni riguardano il funzionamento interno della struttura — arrivo, partenza, mancata presentazione — e l'ospite le conosce già perché era presente. Un annullamento deciso al banco, invece, potrebbe non saperlo affatto.
 
 **Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`.
 
@@ -701,6 +763,37 @@ L'annullamento libera **immediatamente** lo slot.
 Se nel frattempo le camere sono state vendute a qualcun altro la proroga viene respinta: il blocco non si può riattivare su uno slot ormai occupato, e l'exclusion constraint lo impedisce.
 
 **Test**: `TestOperations::test_proroga_hold_su_prenotazione_confermata_rifiutata`, `test_proroga_hold_su_prenotazione_in_attesa`.
+
+---
+
+### 17 · `POST /api/v1/admin/bookings/sweep-expired`
+
+**Esegue subito lo sweeper delle scadenze.**
+
+| | |
+|:--|:--|
+| **Accesso** | Admin |
+| **Body** | nessuno |
+| **Risposta** | `SweepResultSchema` |
+
+**Codici**: `200` · `401` · `403`
+
+**Logica.** Porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto, disattiva le righe camera, invalida i token e scrive la traccia storica con attore `SYSTEM`. Le email partono **dopo** il commit, come nel giro automatico.
+
+**A cosa serve.** A collaudare il meccanismo senza restare quindici minuti a guardare l'orologio, e come leva operativa quando lo sweeper in background è spento (`SWEEPER_ENABLED=false`) perché lo si pilota da uno scheduler esterno.
+
+**Non è distruttivo.** Libera slot che il sistema considera già liberi, e rieseguirlo non cambia nulla: la seconda passata non trova più prenotazioni in attesa scadute.
+
+**Test**: `test_l_admin_puo_eseguire_lo_sweeper_a_mano`, `test_lo_sweeper_a_mano_e_idempotente`, `test_un_utente_semplice_non_puo_eseguire_lo_sweeper`, `test_senza_autenticazione_lo_sweeper_e_inaccessibile`.
+
+```bash
+curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
+  -b cookies.txt
+```
+
+```json
+{"expired_count": 3, "notified_count": 2, "swept_at": "2026-09-20T14:31:07Z"}
+```
 
 ---
 
@@ -856,6 +949,18 @@ Contenitore: `items[]`, `total`, `page`, `page_size`, `pages`.
 
 ---
 
+#### `SweepResultSchema`
+
+| Campo | Tipo | Note |
+|:--|:--|:--|
+| `expired_count` | int | Prenotazioni portate a `EXPIRED` |
+| `notified_count` | int | Ospiti avvisati via email |
+| `swept_at` | datetime | Istante di esecuzione, in UTC |
+
+`notified_count` è minore o uguale a `expired_count`: le scadenze più vecchie di `SWEEPER_NOTIFY_MAX_AGE_HOURS` vengono sistemate a database ma non notificate.
+
+---
+
 ## 6. Enumerazioni
 
 ### `BookingStatus`
@@ -907,15 +1012,23 @@ Ogni transizione non prevista produce `409`. Ogni transizione eseguita lascia un
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
-| `test_booking_api.py` | 18 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza** |
+| `test_booking_api.py` | 26 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email** |
 | `test_admin_booking_api.py` | 32 | sì | Autorizzazione, creazione on-behalf-of, modifica con optimistic locking, stato, incassi |
-| **Totale eseguito** | **~140** | | il test di concorrenza è parametrizzato su 10 iterazioni |
+| `test_email_service.py` | 17 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale |
+| `test_booking_expiration.py` | 15 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin |
+| **Totale eseguito** | **~172** | | il test di concorrenza è parametrizzato su 10 iterazioni |
 
 ### Il test che conta più di tutti
 
 `test_due_prenotazioni_concorrenti_una_sola_vince` lancia due creazioni identiche con `asyncio.gather` su sessioni distinte e pretende **esattamente un successo e un `RoomNotAvailable`**. È ripetuto 10 volte, perché una race condition che si manifesta una volta su dieci resta una race condition.
 
 L'anti-overbooking non è garantito dal codice applicativo ma da un **exclusion constraint di PostgreSQL**: nessuna sequenza di operazioni concorrenti può produrre una doppia vendita.
+
+### Il test che ha trovato un bug scrivendosi
+
+`test_il_link_ricevuto_per_email_permette_davvero_di_annullare` estrae il token dal corpo dell'email e lo usa su `POST /cancel`, esattamente come farebbe l'ospite. È l'unico test che percorre l'intera catena *emissione → email → endpoint*, ed è quello che ha reso visibile un endpoint che nessun client poteva raggiungere (§8bis.11.3).
+
+La lezione è generale: un test che chiama il servizio direttamente dimostra che il servizio parla con sé stesso. Solo un test che si mette nei panni del chiamante dimostra che il chiamante può arrivarci.
 
 ---
 
@@ -973,13 +1086,29 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Cancellare una camera con prenotazioni → `409` `EntityInUse`
 - [ ] Cancellare un utente → le sue prenotazioni sopravvivono con `user_id` a `null`
 
-### Da verificare allo Step F
-- [ ] Attesa oltre 15 minuti senza conferma → stato `EXPIRED` e slot riprenotabile
+### Email
+- [ ] `POST /` → nei log compare l'invio di `booking_pending` con il link di conferma
+- [ ] Seguire il link e confermare → arriva `booking_confirmed` con il **link di gestione**
+- [ ] Usare quel link su `POST /cancel` → la prenotazione passa a `CANCELLED`
+- [ ] Riusare lo stesso link → `400`: il token si spende una volta sola
+- [ ] L'annullamento genera `booking_cancelled`
 - [ ] Con `EMAIL_ENABLED=true`, `confirmation_token` è `null` nella risposta
+- [ ] All'avvio di uvicorn compare `Sweeper avviato: intervallo ... secondi` — se manca, i log applicativi non hanno una destinazione
+- [ ] Prenotare con un nome contenente `<b>test</b>` → nell'HTML compare escapato, non interpretato
+- [ ] Spegnere il server SMTP e prenotare → la prenotazione nasce comunque (`201`)
+
+### Sweeper delle scadenze
+- [ ] Attesa oltre 15 minuti senza conferma → stato `EXPIRED` e slot riprenotabile
+- [ ] `POST /admin/bookings/sweep-expired` → `expired_count` coerente
+- [ ] Rieseguirlo subito dopo → `expired_count: 0`
+- [ ] Dopo lo sweep, riprenotare le stesse date sulla stessa camera → riesce
+- [ ] Il link di conferma di una prenotazione scaduta non funziona più
+- [ ] Nel dettaglio admin, l'ultima riga di storico ha attore `SYSTEM`
+- [ ] Con `SWEEPER_ENABLED=false` nulla scade da solo, ma l'endpoint 17 funziona
 
 ---
 
-## 8bis. Due trappole da conoscere
+## 8bis. Tre trappole da conoscere
 
 Emerse durante lo sviluppo, e rilevanti per chi lavora su questo codice.
 
@@ -1010,12 +1139,40 @@ database vuoto. Corretto allo Step E chiudendo la transazione esplicitamente.
 risposta non prova nulla. Serve una **richiesta successiva**, che usa una
 sessione diversa.
 
+### 11.3 Un endpoint può essere corretto e comunque irraggiungibile
+
+Due casi nello stesso modulo, trovati a distanza di un giorno.
+
+`POST /me/{booking_id}/cancel` chiedeva l'`id` interno, che
+`BookingPublicSchema` non espone per scelta: nessuna risposta lo restituiva
+all'ospite, quindi nessun client poteva costruire quell'URL. Corretto allo
+Step E in `/me/{code}/cancel`.
+
+`POST /cancel` cercava un token `CANCEL` o `MANAGE`, e **nessun percorso di
+codice ne emetteva uno**. La rotta era scritta, coperta da test di servizio e
+documentata; semplicemente, la credenziale che pretendeva non esisteva.
+Corretto allo Step F emettendo il token `MANAGE` alla conferma.
+
+Entrambi sono sopravvissuti ai test perché quei test chiamavano il servizio
+direttamente, costruendosi in casa ciò che un client non può costruire. E in
+entrambi i casi non è stato un test a trovarli: è stato il **doverli
+scrivere**, cioè il primo momento in cui qualcuno si è messo nei panni di chi
+chiama.
+
+**Due controlli che vale la pena fare** quando si aggiunge una rotta pubblica:
+
+1. ogni parametro di percorso compare in almeno uno schema di risposta
+   pubblico;
+2. ogni credenziale richiesta viene emessa da qualche parte, e quel punto è
+   raggiungibile dall'utente che dovrà spenderla.
+
 ---
 
 ## 9. Changelog
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 20/09/2026 | **F** | `configure_logging()`: i log applicativi avevano un logger ma nessun handler, quindi venivano scartati in silenzio · servizio email con 4 template HTML+testo · sweeper delle scadenze in `lifespan` · `POST /admin/bookings/sweep-expired` · **token `MANAGE` finalmente emesso: `POST /cancel` era irraggiungibile** · invio post-commit con `BackgroundTasks` · `FOR UPDATE SKIP LOCKED` sullo sweeper · nessuna email su `PENDING_PAYMENT` |
 | 20/09/2026 | **E** | 7 endpoint amministrativi · **`POST /me/{code}/cancel` ora usa il codice invece dell'`id` interno** (era inutilizzabile dal client) · modifica di date e camere con ricalcolo prezzo · optimistic locking esposto al client (`version`) · `ConcurrentModification` · storico esteso alle modifiche non di stato |
 | 20/09/2026 | **D** | 9 endpoint pubblici e utente · rate limiting · captcha Turnstile · honeypot · `Retry-After` · `BookingCreatedSchema` · `trusted_proxy_count` |
 | 20/09/2026 | **C** | Preventivo firmato · token monouso · motore di prenotazione con locking a 3 livelli · disponibilità con combinazioni |
@@ -1028,8 +1185,9 @@ sessione diversa.
 
 | Step | Contenuto | Impatto su questo documento |
 |:--|:--|:--|
-| **F** | Email e sweeper | `confirmation_token` sparisce dalle risposte; transizione automatica a `EXPIRED`; endpoint manuale `POST /admin/bookings/sweep-expired` |
-| **G** | Pagamenti Stripe | Endpoint webhook e creazione Payment Intent; codici `402` |
+| **G** | Pagamenti Stripe | Endpoint webhook e creazione Payment Intent; codici `402`; l'email di conferma per le prenotazioni `PAY_NOW` partirà da lì |
+| — | Email di modifica | Un messaggio che dica *cosa* è cambiato quando l'admin sposta date o camere (endpoint 13) |
+| — | Outbox pattern | Oggi un'email persa fra commit e invio non lascia traccia. Con un outbox l'invio diventa ritentabile |
 
 ---
 

@@ -1,0 +1,26 @@
+Ciao {{ booking.guest_firstname }},
+
+la tua prenotazione è stata ANNULLATA. Le camere sono tornate disponibili e
+non ti aspettiamo più per le date indicate qui sotto.
+{% if booking.payment_option.value == "PAY_NOW" %}
+
+Per quanto riguarda l'importo già pagato, ti contatteremo separatamente.
+{% endif %}
+
+Prenota un nuovo soggiorno:
+{{ booking_url }}
+
+--- RIEPILOGO ---
+Codice prenotazione: {{ booking.code }}
+Arrivo:    {{ booking.check_in | data }}
+Partenza:  {{ booking.check_out | data }}
+Notti:     {{ booking.nights }}
+Ospiti:    {{ booking.guest_count }}
+{% for item in booking.rooms %}
+Camera:    {{ item.room_name }} (n. {{ item.room_number }})
+{% endfor %}
+Totale:    {{ booking.total_price | importo }} {{ booking.currency }}
+
+Non sei stato tu ad annullare? Scrivici: ricostruiamo insieme cosa è successo.
+
+B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.

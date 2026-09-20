@@ -246,8 +246,13 @@ async def test_conferma_completa_il_ciclo(session, rooms):
         guest_payload(build_quote_token([room.id], [Decimal(room.price)]))
     )
 
-    confermata = await service.confirm_booking(creata.confirmation_token)
+    # `confirm_booking` restituisce un `BookingCreationResult`, non lo schema:
+    # dallo Step F la conferma emette anche il token di gestione, che il
+    # chiamante deve poter inserire nell'email successiva.
+    esito = await service.confirm_booking(creata.confirmation_token)
+    confermata = esito.booking
 
+    assert esito.manage_token, "La conferma deve emettere il token di gestione"
     assert confermata.status == BookingStatus.CONFIRMED
     assert confermata.hold_expires_at is None
     assert confermata.confirmed_at is not None

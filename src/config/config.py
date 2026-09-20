@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     #: backend in query string: la SPA lo inoltra nel body di una POST.
     frontend_base_url: str = "http://localhost:4200"
 
+    #: Soglia dei log applicativi (`src.*`). Vale solo per il codice del
+    #: progetto: i log di uvicorn e di SQLAlchemy restano governati dalle loro
+    #: configurazioni.
+    log_level: str = "INFO"
+
     max_file_size: int
 
     # --- Database ------------------------------------------------------------
@@ -66,6 +71,26 @@ class Settings(BaseSettings):
     booking_code_prefix: str = "BB"
     #: Intervallo di esecuzione dello sweeper delle prenotazioni scadute.
     sweeper_interval_seconds: int = 60
+    #: Avvio automatico dello sweeper insieme all'applicazione. Disattivabile
+    #: quando si preferisce pilotarlo da `POST /admin/bookings/sweep-expired`
+    #: o da uno scheduler esterno.
+    sweeper_enabled: bool = True
+    #: Prenotazioni trattate a ogni passata. Limita la durata della singola
+    #: transazione e il numero di righe tenute sotto lock.
+    sweeper_batch_size: int = 100
+    #: Età massima di una scadenza per cui vale ancora la pena avvisare l'ospite.
+    #:
+    #: Serve a una situazione precisa: se lo sweeper resta fermo per giorni, al
+    #: riavvio trova un arretrato di prenotazioni scadute. Gli stati vanno
+    #: comunque sistemati, ma spedire centinaia di email su richieste che
+    #: l'ospite ha dimenticato da un pezzo è solo un modo per farsi segnalare
+    #: come spam.
+    sweeper_notify_max_age_hours: int = 24
+    #: Tetto alla validità del token di gestione inviato con l'email di
+    #: conferma. Normalmente il token scade alla partenza; questo limite entra
+    #: in gioco solo per soggiorni prenotati con grande anticipo, perché un
+    #: link valido per anni è un link che prima o poi finisce altrove.
+    manage_token_max_days: int = 400
 
     # --- Booking: pricing ----------------------------------------------------
     #: Sconto applicato all'opzione PAY_NOW (pagamento online anticipato).
@@ -105,6 +130,9 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     email_from: str = "noreply@bbcosenza.it"
     email_from_name: str = "B&B Cosenza"
+    #: Timeout della connessione SMTP. Volutamente basso: l'invio gira in
+    #: background, ma un socket appeso tiene comunque occupato un thread.
+    email_send_timeout_seconds: int = 10
 
     # --- Captcha (Cloudflare Turnstile) --------------------------------------
     captcha_enabled: bool = False

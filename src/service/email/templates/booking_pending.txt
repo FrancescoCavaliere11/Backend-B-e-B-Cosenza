@@ -1,0 +1,31 @@
+Ciao {{ booking.guest_firstname }},
+
+abbiamo ricevuto la tua richiesta di prenotazione. Le camere sono riservate a
+tuo nome, ma NON sono ancora confermate: per completare serve un tuo clic.
+{% if booking.hold_expires_at %}
+
+Hai tempo fino alle {{ booking.hold_expires_at | istante }}. Dopo quel momento
+le camere tornano disponibili per altri ospiti.
+{% endif %}
+
+Conferma la prenotazione:
+{{ confirm_url }}
+
+--- RIEPILOGO ---
+Codice prenotazione: {{ booking.code }}
+Arrivo:    {{ booking.check_in | data }}
+Partenza:  {{ booking.check_out | data }}
+Notti:     {{ booking.nights }}
+Ospiti:    {{ booking.guest_count }}
+{% for item in booking.rooms %}
+Camera:    {{ item.room_name }} (n. {{ item.room_number }})
+{% endfor %}
+{% if booking.discount_amount > 0 %}
+Sconto:    -{{ booking.discount_amount | importo }} {{ booking.currency }}
+{% endif %}
+Totale:    {{ booking.total_price | importo }} {{ booking.currency }}
+
+Non hai richiesto tu questa prenotazione? Ignora il messaggio: senza conferma
+scade da sola e non ti verrà addebitato nulla.
+
+B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.

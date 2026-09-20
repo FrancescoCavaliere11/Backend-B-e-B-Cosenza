@@ -22,6 +22,7 @@ loop fra fixture di scope diverso, che cambiano da una versione di
 from decimal import Decimal
 from typing import List
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -172,6 +173,41 @@ async def api_client(session_factory):
 
     app.dependency_overrides.clear()
     reset_rate_limiter()
+
+
+@pytest.fixture(autouse=True)
+def email_backend():
+    """
+    Sostituisce il canale email con uno che registra i messaggi in memoria.
+
+    È `autouse` per due ragioni. La prima è igienica: nessun test deve toccare
+    un server SMTP, nemmeno per sbaglio. La seconda è che rende *osservabile*
+    una parte del sistema che altrimenti non lo sarebbe — senza questo backend
+    l'unico modo di sapere se una email è partita sarebbe aprire una casella di
+    posta, e un comportamento che non si può verificare in un test è un
+    comportamento che prima o poi si rompe senza che nessuno se ne accorga.
+
+    I test che non guardano le email non ne risentono; quelli che lo fanno
+    ricevono la fixture e leggono `backend.messages`.
+
+    È una fixture **sincrona** di proposito: non compie alcuna operazione
+    asincrona, e resa `async` sarebbe inservibile per i test sincroni di
+    `test_email_service.py`, che pure la ricevono essendo `autouse`.
+
+    ⚠️ Le email partono da `BackgroundTasks`, cioè **dopo** che la risposta è
+    stata prodotta. Con `ASGITransport` questo avviene comunque prima che
+    `await client.post(...)` ritorni, quindi le asserzioni subito dopo la
+    chiamata sono attendibili.
+    """
+    from src.service.email.backend import MemoryEmailBackend
+    from src.service.email.email_service import configure_email_service, reset_email_service
+
+    backend = MemoryEmailBackend()
+    configure_email_service(backend)
+
+    yield backend
+
+    reset_email_service()
 
 
 #: Password usata dagli utenti di prova. Rispetta i validatori del progetto:

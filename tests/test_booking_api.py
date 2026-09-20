@@ -373,3 +373,195 @@ async def test_lookup_con_codice_ed_email_corretti(api_client, rooms):
 
     assert response.status_code == 200
     assert response.json()["code"] == created["booking"]["code"]
+
+
+# ===========================================================================
+# Email: criterio di completamento dello Step F
+# ===========================================================================
+
+def _estrai_token(corpo: str, percorso: str) -> str:
+    """
+    Recupera un token dal link contenuto nel corpo di una email.
+
+    Fa quello che farebbe l'ospite: apre il messaggio e segue il link. È
+    l'unico modo di verificare davvero che un token emesso dal server arrivi
+    fino a un endpoint utilizzabile — assertire sul valore restituito dal
+    servizio dimostrerebbe solo che il servizio parla con sé stesso.
+    """
+    import re
+    from urllib.parse import unquote
+
+    trovato = re.search(rf"{re.escape(percorso)}\?token=(\S+)", corpo)
+    assert trovato, f"Nessun link {percorso} nel messaggio:\n{corpo}"
+    return unquote(trovato.group(1))
+
+
+async def test_la_creazione_manda_una_sola_email_di_conferma(
+        api_client, rooms, email_backend
+):
+    quote = await _get_quote(api_client, rooms[0].id)
+    await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+
+    messaggi = email_backend.sent_to(GUEST["email"])
+    assert len(messaggi) == 1, "Una creazione, un messaggio"
+    assert "/prenotazione/conferma?token=" in messaggi[0].text_body
+
+
+async def test_la_conferma_manda_il_riepilogo_con_il_link_di_gestione(
+        api_client, rooms, email_backend
+):
+    quote = await _get_quote(api_client, rooms[0].id)
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+
+    email_backend.clear()
+    await api_client.post(
+        f"{BASE}/confirm", json={"token": creata.json()["confirmation_token"]}
+    )
+
+    messaggio = email_backend.last
+    assert "confermata" in messaggio.subject.lower()
+    assert "/prenotazione/gestisci?token=" in messaggio.text_body
+
+
+async def test_il_link_ricevuto_per_email_permette_davvero_di_annullare(
+        api_client, rooms, email_backend
+):
+    """
+    Il test che chiude il difetto scoperto pianificando lo Step F.
+
+    `POST /cancel` cerca un token con scopo `CANCEL` o `MANAGE`, ma **nessun
+    percorso di codice ne emetteva uno**: l'endpoint era scritto, testato a
+    livello di servizio e documentato, e nessun client poteva raggiungerlo.
+    Non se n'era accorto nessuno perché i test del servizio costruivano il
+    token a mano, cosa che un ospite non può fare.
+
+    Qui il token viene estratto dal corpo dell'email, come farebbe lui.
+    """
+    quote = await _get_quote(api_client, rooms[0].id)
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+    await api_client.post(
+        f"{BASE}/confirm", json={"token": creata.json()["confirmation_token"]}
+    )
+
+    token_di_gestione = _estrai_token(email_backend.last.text_body, "/prenotazione/gestisci")
+
+    response = await api_client.post(
+        f"{BASE}/cancel",
+        json={"token": token_di_gestione, "reason": "Cambio di programma"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "CANCELLED"
+
+
+async def test_l_annullamento_avvisa_l_ospite(api_client, rooms, email_backend):
+    quote = await _get_quote(api_client, rooms[0].id)
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+    await api_client.post(
+        f"{BASE}/confirm", json={"token": creata.json()["confirmation_token"]}
+    )
+    token = _estrai_token(email_backend.last.text_body, "/prenotazione/gestisci")
+
+    email_backend.clear()
+    await api_client.post(f"{BASE}/cancel", json={"token": token, "reason": "Imprevisto"})
+
+    assert "annullata" in email_backend.last.subject.lower()
+
+
+async def test_il_link_di_gestione_si_spende_una_volta_sola(
+        api_client, rooms, email_backend
+):
+    """Un link di annullamento che resta valido è un link riutilizzabile."""
+    quote = await _get_quote(api_client, rooms[0].id)
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+    await api_client.post(
+        f"{BASE}/confirm", json={"token": creata.json()["confirmation_token"]}
+    )
+    token = _estrai_token(email_backend.last.text_body, "/prenotazione/gestisci")
+
+    await api_client.post(f"{BASE}/cancel", json={"token": token, "reason": "Imprevisto"})
+    seconda = await api_client.post(
+        f"{BASE}/cancel", json={"token": token, "reason": "Di nuovo"}
+    )
+
+    assert seconda.status_code == 400
+
+
+async def test_il_pagamento_online_non_manda_ancora_nulla(
+        api_client, rooms, email_backend
+):
+    """
+    Con `PAY_NOW` la prenotazione nasce `PENDING_PAYMENT`: l'ospite è ancora
+    sulla pagina di pagamento e non c'è niente da comunicargli. Annunciargli
+    una prenotazione che l'incasso potrebbe far fallire sarebbe peggio del
+    silenzio. La notifica arriverà dal webhook Stripe (Step G).
+    """
+    response = await api_client.post(
+        f"{BASE}/quote",
+        json={
+            "check_in": CHECK_IN.isoformat(),
+            "check_out": CHECK_OUT.isoformat(),
+            "guest_count": 2,
+            "room_ids": [str(rooms[0].id)],
+            "payment_option": "PAY_NOW",
+        },
+    )
+    quote = response.json()
+
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+
+    assert creata.json()["booking"]["status"] == "PENDING_PAYMENT"
+    assert email_backend.messages == []
+
+
+async def test_un_canale_email_guasto_non_impedisce_la_prenotazione(
+        api_client, rooms
+):
+    """
+    Se il server SMTP è irraggiungibile la prenotazione deve comunque nascere.
+
+    Rifiutarla costerebbe un incasso vero; una mail non partita si recupera dal
+    back-office. Stessa scelta fatta per il captcha.
+    """
+    from src.service.email.backend import FailingEmailBackend
+    from src.service.email.email_service import configure_email_service
+
+    configure_email_service(FailingEmailBackend())
+
+    quote = await _get_quote(api_client, rooms[0].id)
+    response = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+
+    assert response.status_code == 201, response.text
+
+
+async def test_la_prenotazione_di_un_utente_autenticato_avvisa_il_suo_indirizzo(
+        user_client, regular_user, rooms, email_backend
+):
+    quote = await _get_quote(user_client, rooms[0].id)
+    response = await user_client.post(
+        f"{BASE}/me", json={"quote_token": quote["quote_token"], "accept_terms": True}
+    )
+
+    assert response.status_code == 201, response.text
+    assert email_backend.sent_to(regular_user.email)

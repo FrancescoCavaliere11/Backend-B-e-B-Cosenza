@@ -18,7 +18,7 @@ il flag viene scritto, e ogni transizione di stato ci passa.
 """
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 from uuid import UUID
 
@@ -127,18 +127,41 @@ _EXCLUSION_VIOLATION_SQLSTATE = "23P01"
 @dataclass
 class BookingCreationResult:
     """
-    Esito della creazione di una prenotazione.
+    Esito di una creazione o di una conferma.
 
-    `confirmation_token` è il valore **in chiaro** del token di conferma: non
-    viene mai persistito (nel database c'è solo il suo hash) e non deve mai
-    finire nei log. Esiste unicamente per essere inserito nel link dell'email,
-    che verrà spedita allo Step F. È `None` quando la conferma via email non
-    serve: prenotazioni create dall'admin o pagamenti online, dove la verifica
-    dell'identità è il pagamento stesso.
+    I due token sono valori **in chiaro**: nel database esiste solo il loro
+    hash, non vengono mai registrati nei log e vivono giusto il tempo di
+    entrare nel link di un'email.
+
+    `confirmation_token` serve a confermare una prenotazione temporanea. È
+    `None` quando la conferma non serve: creazione dal back-office o pagamento
+    online, dove la verifica d'identità è il pagamento stesso.
+
+    `manage_token` è il link di gestione, e in particolare **l'unico modo che
+    un ospite non registrato ha di annullare**: non possiede un account, e la
+    consultazione con codice ed email è in sola lettura. Viene emesso quando la
+    prenotazione diventa confermata — alla conferma via email, oppure subito se
+    nasce già confermata.
     """
 
     booking: Union[BookingPublicSchema, BookingSchema]
     confirmation_token: Optional[str] = None
+    manage_token: Optional[str] = None
+
+
+@dataclass
+class ExpiredBookingNotice:
+    """
+    Una prenotazione portata a `EXPIRED` dallo sweeper.
+
+    `notify` distingue le scadenze appena avvenute da quelle recuperate con
+    ritardo: se lo sweeper è rimasto fermo, gli stati vanno comunque sistemati,
+    ma avvisare l'ospite di una richiesta dimenticata giorni fa è inutile per
+    lui e dannoso per la reputazione del mittente.
+    """
+
+    booking: BookingPublicSchema
+    notify: bool
 
 
 class BookingService:
@@ -496,8 +519,17 @@ class BookingService:
         )
 
         confirmation_token: Optional[str] = None
+        manage_token: Optional[str] = None
+
         if with_confirmation_token:
             confirmation_token = self._issue_confirmation_token(booking)
+        elif initial_status == BookingStatus.CONFIRMED:
+            # Nasce già confermata (pagamento online, oppure creazione dal
+            # back-office con identità già verificata al telefono): non ci sarà
+            # un passaggio di conferma in cui emettere il link di gestione, e
+            # senza quello l'ospite non registrato resterebbe senza alcun modo
+            # di annullare.
+            manage_token = self._issue_manage_token(booking)
 
         await self.booking_repository.flush()
 
@@ -506,17 +538,27 @@ class BookingService:
             if admin_view
             else self._to_public_schema(booking, rooms)
         )
-        return BookingCreationResult(booking=schema, confirmation_token=confirmation_token)
+        return BookingCreationResult(
+            booking=schema,
+            confirmation_token=confirmation_token,
+            manage_token=manage_token,
+        )
 
     # ================================================================== #
     # Conferma e cancellazione                                           #
     # ================================================================== #
 
-    async def confirm_booking(self, plain_token: str) -> BookingPublicSchema:
-        """Conferma una prenotazione tramite il token ricevuto per email."""
+    async def confirm_booking(self, plain_token: str) -> BookingCreationResult:
+        """
+        Conferma una prenotazione tramite il token ricevuto per email.
+
+        Restituisce un `BookingCreationResult` e non il solo schema perché la
+        conferma emette il token di gestione, che il chiamante deve poter
+        inserire nell'email successiva.
+        """
         return await self._in_transaction(lambda: self._execute_confirm(plain_token))
 
-    async def _execute_confirm(self, plain_token: str) -> BookingPublicSchema:
+    async def _execute_confirm(self, plain_token: str) -> BookingCreationResult:
         token = await self.token_repository.get_by_hash(
             hash_booking_token(plain_token), BookingTokenPurpose.CONFIRM_EMAIL
         )
@@ -576,8 +618,13 @@ class BookingService:
         # temporanea e lo slot resta occupato in modo definitivo.
         self._sync_items_active_flag(booking)
 
+        manage_token = self._issue_manage_token(booking)
+
         await self.booking_repository.flush()
-        return self._to_public_schema(booking)
+        return BookingCreationResult(
+            booking=self._to_public_schema(booking),
+            manage_token=manage_token,
+        )
 
     async def cancel_by_token(
             self,
@@ -960,6 +1007,82 @@ class BookingService:
     # Letture                                                            #
     # ================================================================== #
 
+    # ================================================================== #
+    # Scadenze                                                           #
+    # ================================================================== #
+
+    async def expire_pending(self, limit: Optional[int] = None) -> List[ExpiredBookingNotice]:
+        """
+        Porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto.
+
+        È **l'unico proprietario di questa transizione** (§4.1 del piano): in
+        nessun altro punto del codice una prenotazione diventa `EXPIRED`.
+        `confirm_booking` ci aveva provato, ma scriveva su un percorso che
+        subito dopo sollevava un'eccezione, quindi la modifica veniva annullata
+        dal rollback nell'istante stesso in cui avveniva.
+
+        Va detto che il sistema resta corretto anche se questo metodo non gira
+        mai: gli slot tornano prenotabili per altre due vie — le query di
+        disponibilità scartano i pending scaduti, e la *just-in-time
+        expiration* disattiva le righe camera durante la creazione successiva
+        sulle stesse date. Quello che manca senza sweeper è la pulizia degli
+        stati e l'avviso all'ospite, non la correttezza.
+
+        :param limit: prenotazioni trattate in questa passata.
+        :return: un avviso per prenotazione, con l'indicazione se valga ancora
+            la pena notificarla.
+        """
+        return await self._in_transaction(lambda: self._execute_expire_pending(limit))
+
+    async def _execute_expire_pending(
+            self,
+            limit: Optional[int]
+    ) -> List[ExpiredBookingNotice]:
+        bookings = await self.booking_repository.get_expired_pending(
+            limit=limit or settings.sweeper_batch_size,
+            # Con più worker uvicorn girano più sweeper insieme: il lock con
+            # SKIP LOCKED fa sì che si dividano le righe invece di lavorare
+            # due volte sulle stesse.
+            for_update=True,
+        )
+
+        notify_threshold = datetime.now(timezone.utc) - timedelta(
+            hours=settings.sweeper_notify_max_age_hours
+        )
+        notices: List[ExpiredBookingNotice] = []
+
+        for booking in bookings:
+            # Letto prima della transizione: è il dato che distingue una
+            # scadenza appena avvenuta da una recuperata in ritardo.
+            expired_at = booking.hold_expires_at
+
+            self._apply_transition(
+                booking,
+                BookingStatus.EXPIRED,
+                AuditActorType.SYSTEM,
+                reason="Blocco scaduto senza conferma",
+            )
+            booking.last_updated_by = _SYSTEM_AUDIT_MARKER
+
+            # `hold_expires_at` resta valorizzato: su una prenotazione scaduta
+            # racconta *quando* è scaduta, e non rischia di riportarla nel
+            # bacino dello sweeper, che filtra per stato.
+
+            # Il token di conferma non deve sopravvivere alla prenotazione che
+            # confermava: un link ancora valido su una prenotazione scaduta
+            # darebbe all'ospite un errore incomprensibile.
+            await self.token_repository.invalidate_all_for_booking(booking.id)
+
+            notices.append(
+                ExpiredBookingNotice(
+                    booking=self._to_public_schema(booking),
+                    notify=expired_at is not None and expired_at >= notify_threshold,
+                )
+            )
+
+        await self.booking_repository.flush()
+        return notices
+
     async def get_admin_booking(self, booking_id: UUID) -> BookingSchema:
         """Dettaglio completo con timeline degli stati, per il back-office."""
         booking = await self.booking_repository.get_by_id(
@@ -1290,6 +1413,40 @@ class BookingService:
                 # Il token scade insieme al blocco dello slot: confermare dopo
                 # che le date sono tornate disponibili non avrebbe senso.
                 expires_at=booking.hold_expires_at,
+            )
+        )
+        return plain_token
+
+    def _issue_manage_token(self, booking: Booking) -> str:
+        """
+        Emette il token di gestione e ne persiste solo l'hash.
+
+        È la credenziale che `POST /bookings/cancel` richiede. Prima dello
+        Step F nessun percorso di codice la emetteva: l'endpoint era scritto,
+        testato a livello di servizio e documentato, ma nessun client poteva
+        ottenerne una, quindi era di fatto irraggiungibile.
+
+        **Scadenza alla partenza**, con un tetto di sicurezza. Le regole su
+        *cosa* l'ospite può fare stanno già in `_assert_guest_can_cancel`: un
+        token che scadesse al termine di cancellazione gratuita gli toglierebbe
+        anche la cancellazione a pagamento, che invece deve poter esercitare.
+
+        :return: valore in chiaro, destinato unicamente al link dell'email.
+        """
+        plain_token, token_hash = generate_booking_token()
+
+        expires_at = datetime.combine(
+            booking.check_out, time.min, tzinfo=timezone.utc
+        )
+        ceiling = datetime.now(timezone.utc) + timedelta(days=settings.manage_token_max_days)
+        expires_at = min(expires_at, ceiling)
+
+        self.token_repository.add(
+            BookingToken(
+                booking_id=booking.id,
+                token_hash=token_hash,
+                purpose=BookingTokenPurpose.MANAGE,
+                expires_at=expires_at,
             )
         )
         return plain_token

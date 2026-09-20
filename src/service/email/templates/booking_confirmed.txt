@@ -1,0 +1,38 @@
+Ciao {{ booking.guest_firstname }},
+
+la tua prenotazione è CONFERMATA. Ti aspettiamo.
+{% if booking.payment_option.value == "PAY_NOW" %}
+
+Il soggiorno è già saldato: all'arrivo non dovrai pagare nulla.
+{% else %}
+
+Il pagamento avviene in struttura al momento dell'arrivo.
+{% endif %}
+{% if booking.cancellation_deadline %}
+
+Puoi annullare gratuitamente fino alle {{ booking.cancellation_deadline | istante }}.
+{% endif %}
+{% if manage_url %}
+
+Gestisci o annulla la prenotazione:
+{{ manage_url }}
+
+Conserva questo messaggio: il link qui sopra è il modo più rapido per
+modificare o annullare il soggiorno.
+{% endif %}
+
+--- RIEPILOGO ---
+Codice prenotazione: {{ booking.code }}
+Arrivo:    {{ booking.check_in | data }}
+Partenza:  {{ booking.check_out | data }}
+Notti:     {{ booking.nights }}
+Ospiti:    {{ booking.guest_count }}
+{% for item in booking.rooms %}
+Camera:    {{ item.room_name }} (n. {{ item.room_number }})
+{% endfor %}
+{% if booking.discount_amount > 0 %}
+Sconto:    -{{ booking.discount_amount | importo }} {{ booking.currency }}
+{% endif %}
+Totale:    {{ booking.total_price | importo }} {{ booking.currency }}
+
+B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.

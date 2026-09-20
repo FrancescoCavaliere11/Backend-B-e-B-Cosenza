@@ -1,0 +1,60 @@
+{#
+  Struttura comune delle email transazionali.
+
+  Layout a tabelle e stili in linea: i client di posta ignorano i fogli di
+  stile esterni e molti scartano anche il <style> nel <head>. Non è codice
+  antiquato per abitudine, è l'unico che si renderizza allo stesso modo su
+  Outlook, Gmail e Apple Mail.
+
+  Autoescape attivo: ogni valore interpolato qui viene escapato.
+#}<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prenotazione {{ booking.code }}</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f6f9; font-family:Helvetica,Arial,sans-serif; color:#1a1a1a;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9; padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+               style="max-width:560px; background:#ffffff; border-radius:8px; overflow:hidden;">
+
+          <tr>
+            <td style="background:#1f4e79; padding:20px 28px;">
+              <div style="color:#ffffff; font-size:17px; font-weight:600; letter-spacing:-0.2px;">
+                B&amp;B Cosenza
+              </div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:28px;">
+              <p style="margin:0 0 14px; font-size:15px;">
+                Ciao {{ booking.guest_firstname }},
+              </p>
+
+              {% block body %}{% endblock %}
+
+              {% include "_summary.html" %}
+
+              {% block footer_note %}{% endblock %}
+            </td>
+          </tr>
+
+          <tr>
+            <td style="background:#f4f6f9; padding:16px 28px; font-size:11.5px; color:#5c6370;">
+              Codice prenotazione <strong>{{ booking.code }}</strong> —
+              conservalo per ogni comunicazione.
+              <br>
+              Questo messaggio è stato inviato automaticamente: non rispondere a questo indirizzo.
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

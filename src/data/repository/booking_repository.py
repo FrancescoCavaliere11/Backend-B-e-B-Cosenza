@@ -1,7 +1,7 @@
 """
 Data Access Layer del modulo Booking.
 
-**Politica transazionale.** A differenza dei repository più vecchi del
+⚠️ **Politica transazionale.** A differenza dei repository più vecchi del
 progetto (`RoomRepository`, `RoomServiceRepository`), questo repository **non
 esegue mai `commit()`**. La creazione di una prenotazione è una singola
 transazione atomica che comprende lock pessimistico sulle camere, liberazione
@@ -299,13 +299,37 @@ class BookingRepository:
     # Sweeper e anti-abuso                                                #
     # ------------------------------------------------------------------ #
 
-    async def get_expired_pending(self, limit: int = 100) -> List[Booking]:
-        """Prenotazioni temporanee il cui blocco è scaduto, da portare a `EXPIRED`."""
+    async def get_expired_pending(
+            self,
+            limit: int = 100,
+            for_update: bool = False
+    ) -> List[Booking]:
+        """
+        Prenotazioni temporanee il cui blocco è scaduto, da portare a `EXPIRED`.
+
+        Le righe camera sono caricate con le rispettive camere: lo sweeper
+        costruisce da qui lo schema pubblico per l'email, e senza il secondo
+        `selectinload` la lettura di `item.room` partirebbe come query
+        implicita in contesto asincrono — il `MissingGreenlet` già incontrato
+        in `_to_admin_schema`.
+
+        :param for_update: blocca le righe con `FOR UPDATE ... SKIP LOCKED`.
+            Serve quando girano più sweeper insieme, cioè con più di un worker
+            uvicorn: chi arriva secondo salta le righe già prese in carico
+            invece di aspettarle, e le due passate si dividono il lavoro anziché
+            duplicarlo. `SKIP LOCKED` e non il semplice `FOR UPDATE` proprio
+            per questo: attendere un lock qui significherebbe rifare a valle un
+            lavoro già fatto.
+
+            Compatibile con `selectinload`, che emette una query separata:
+            `FOR UPDATE` non ammette outer join, che un `joinedload`
+            introdurrebbe.
+        """
         now = datetime.now(timezone.utc)
 
         query = (
             select(Booking)
-            .options(selectinload(Booking.items))
+            .options(selectinload(Booking.items).selectinload(BookingRoomItem.room))
             .where(
                 Booking.status.in_(list(PENDING_BOOKING_STATUSES)),
                 Booking.hold_expires_at.isnot(None),
@@ -314,6 +338,10 @@ class BookingRepository:
             .order_by(Booking.hold_expires_at)
             .limit(limit)
         )
+
+        if for_update:
+            query = query.with_for_update(skip_locked=True, of=Booking)
+
         result = await self.session.execute(query)
         return list(result.scalars().all())
 

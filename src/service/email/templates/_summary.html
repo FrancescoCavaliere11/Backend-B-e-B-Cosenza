@@ -1,0 +1,44 @@
+{# Riepilogo del soggiorno, comune a tutti i messaggi. #}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="margin:18px 0 6px; border-collapse:collapse; font-size:13.5px;">
+  <tr>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#5c6370; width:42%;">Arrivo</td>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; font-weight:600;">{{ booking.check_in | data }}</td>
+  </tr>
+  <tr>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#5c6370;">Partenza</td>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; font-weight:600;">{{ booking.check_out | data }}</td>
+  </tr>
+  <tr>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#5c6370;">Notti</td>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee;">{{ booking.nights }}</td>
+  </tr>
+  <tr>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#5c6370;">Ospiti</td>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee;">{{ booking.guest_count }}</td>
+  </tr>
+  <tr>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#5c6370;">
+      {{ "Camere" if booking.rooms | length > 1 else "Camera" }}
+    </td>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee;">
+      {% for item in booking.rooms %}
+      {{ item.room_name }} (n. {{ item.room_number }}){% if not loop.last %}<br>{% endif %}
+      {% endfor %}
+    </td>
+  </tr>
+  {% if booking.discount_amount > 0 %}
+  <tr>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#5c6370;">Sconto pagamento online</td>
+    <td style="padding:7px 0; border-bottom:1px solid #e3e7ee; color:#1f7a4d;">
+      −{{ booking.discount_amount | importo }} {{ booking.currency }}
+    </td>
+  </tr>
+  {% endif %}
+  <tr>
+    <td style="padding:9px 0; color:#5c6370;">Totale</td>
+    <td style="padding:9px 0; font-size:16px; font-weight:700;">
+      {{ booking.total_price | importo }} {{ booking.currency }}
+    </td>
+  </tr>
+</table>

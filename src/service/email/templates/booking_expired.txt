@@ -1,0 +1,25 @@
+Ciao {{ booking.guest_firstname }},
+
+la tua richiesta di prenotazione è SCADUTA: non abbiamo ricevuto la conferma
+entro il tempo previsto, quindi le camere sono tornate disponibili per altri
+ospiti.
+
+Nessun addebito è stato effettuato. Se vuoi ancora soggiornare da noi, puoi
+ripartire da una nuova ricerca — se le date sono ancora libere, bastano pochi
+minuti.
+
+Prenota di nuovo:
+{{ booking_url }}
+
+--- RIEPILOGO DELLA RICHIESTA SCADUTA ---
+Codice prenotazione: {{ booking.code }}
+Arrivo:    {{ booking.check_in | data }}
+Partenza:  {{ booking.check_out | data }}
+Notti:     {{ booking.nights }}
+Ospiti:    {{ booking.guest_count }}
+{% for item in booking.rooms %}
+Camera:    {{ item.room_name }} (n. {{ item.room_number }})
+{% endfor %}
+Totale:    {{ booking.total_price | importo }} {{ booking.currency }}
+
+B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.

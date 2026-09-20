@@ -648,3 +648,21 @@ class BookingSearchFiltersSchema(CustomModel):
     @property
     def offset(self) -> int:
         return (self.page - 1) * self.page_size
+
+
+# ===========================================================================
+# Manutenzione
+# ===========================================================================
+
+class SweepResultSchema(CustomModel):
+    """
+    Esito di una passata dello sweeper delle scadenze.
+
+    `notified_count` è minore o uguale a `expired_count`: le scadenze più
+    vecchie della soglia configurata vengono sistemate a database ma non
+    notificate all'ospite.
+    """
+
+    expired_count: int = Field(description="Prenotazioni portate a EXPIRED")
+    notified_count: int = Field(description="Ospiti avvisati via email")
+    swept_at: datetime = Field(description="Istante di esecuzione, in UTC")

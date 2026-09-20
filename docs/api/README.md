@@ -7,7 +7,7 @@ collaudo manuale, allo sviluppo frontend e a chi riprende lo sviluppo del backen
 
 | Area | Sorgente | PDF | Stato |
 |:--|:--|:--|:--|
-| Booking / Prenotazioni | `booking_api.md` | `BOOKING_API.pdf` | Step A → D |
+| Booking / Prenotazioni | `booking_api.md` | `BOOKING_API.pdf` | Step A → F |
 
 Le aree già esistenti ma non ancora documentate (Auth, Users, Rooms, Room Services,
 Extra Services) riceveranno un proprio file con la stessa struttura.
