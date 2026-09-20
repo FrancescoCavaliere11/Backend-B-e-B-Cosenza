@@ -76,15 +76,55 @@ class AvailableRoomSchema(CustomModel):
     subtotal: Decimal
     services: List[RoomServiceSchema] = Field(default_factory=list)
 
+    #: La camera, da sola, ospita tutte le persone indicate nella ricerca.
+    #: Consente al frontend la modalità "camera singola sufficiente" senza una
+    #: seconda chiamata e senza che il backend nasconda le altre camere.
+    fits_all_guests: bool = False
+
     model_config = ConfigDict(from_attributes=True)
 
 
+class RoomCombinationSchema(CustomModel):
+    """
+    Combinazione di camere che insieme ospitano tutti gli ospiti.
+
+    Porta solo gli identificativi: i dati delle camere sono già in
+    `AvailabilityResponseSchema.rooms`, e ripeterli moltiplicherebbe il
+    payload per il numero di combinazioni proposte.
+
+    Vengono restituite solo combinazioni **minimali**: se togliendo una camera
+    gli ospiti ci starebbero comunque, la combinazione non viene proposta.
+    """
+
+    room_ids: List[UUID]
+    rooms_count: int
+    total_capacity: int
+    total_price: Decimal
+
+    #: Posti letto eccedenti rispetto agli ospiti. A parità di numero di
+    #: camere e di prezzo si preferisce la combinazione che spreca meno.
+    wasted_capacity: int
+
+
 class AvailabilityResponseSchema(CustomModel):
+    """
+    Esito della ricerca di disponibilità.
+
+    Serve le tre modalità di prenotazione con una sola chiamata:
+
+    * *camera singola sufficiente*: filtrare `rooms` su `fits_all_guests`;
+    * *scelta manuale*: presentare `rooms` per intero — il vincolo
+      "capienza totale ≥ ospiti" è verificato al preventivo, senza nascondere
+      camere all'utente;
+    * *combinazioni suggerite*: usare `suggested_combinations`.
+    """
+
     check_in: date
     check_out: date
     nights: int
     guest_count: int
     rooms: List[AvailableRoomSchema] = Field(default_factory=list)
+    suggested_combinations: List[RoomCombinationSchema] = Field(default_factory=list)
 
 
 # ===========================================================================

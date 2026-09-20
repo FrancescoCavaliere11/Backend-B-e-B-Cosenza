@@ -1,7 +1,6 @@
 from typing import Optional, List
 from uuid import UUID
 
-from dns.e164 import query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -40,6 +39,43 @@ class RoomRepository:
 
     async def get_all(self) -> List[Room]:
         query = select(Room).options(selectinload(Room.services)).order_by(Room.number.asc())
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+
+    async def get_all_enabled(self) -> List[Room]:
+        """
+        Camere attualmente in vendita.
+
+        Base della ricerca di disponibilità: una camera disabilitata non deve
+        comparire fra i risultati anche quando non ha prenotazioni.
+        """
+        query = (
+            select(Room)
+            .options(selectinload(Room.services))
+            .where(Room.enabled.is_(True))
+            .order_by(Room.number.asc())
+        )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+
+    async def get_all_by_ids(self, room_ids: List[UUID]) -> List[Room]:
+        """
+        Camere corrispondenti agli identificativi indicati.
+
+        Non solleva eccezioni sugli ID inesistenti: restituisce ciò che trova,
+        e il confronto fra quantità richiesta e ottenuta spetta al Service.
+        """
+        if not room_ids:
+            return []
+
+        query = (
+            select(Room)
+            .options(selectinload(Room.services))
+            .where(Room.id.in_(room_ids))
+            .order_by(Room.number.asc())
+        )
         result = await self.session.execute(query)
         return list(result.scalars().all())
 

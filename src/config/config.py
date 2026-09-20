@@ -37,11 +37,21 @@ class Settings(BaseSettings):
     db_password: SecretStr
     db_name: str
 
+    #: Database usato dai test automatici. Se omesso vale `<db_name>_test`, e
+    #: le fixture di pytest lo creano da sole alla prima esecuzione.
+    #: Non deve mai coincidere con `db_name`: i test committano dati reali e
+    #: uno di essi è progettato per fallire, quindi può lasciare righe dietro
+    #: di sé — una riga di prova attiva blocca fisicamente uno slot in vendita.
+    db_test_name: Optional[str] = None
+
     # --- JWT -----------------------------------------------------------------
     jwt_secret_key: str
     jwt_algorithm: str
     access_token_expire_minutes: int
     refresh_token_expire_minutes: int
+
+    #: Validità del preventivo firmato presentato al momento della prenotazione.
+    quote_token_expire_minutes: int = 15
 
     # --- Booking: locking e regole di soggiorno ------------------------------
     #: Durata del blocco temporaneo dello slot in attesa di conferma/pagamento.
