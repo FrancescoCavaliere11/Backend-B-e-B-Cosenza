@@ -6,6 +6,7 @@ from src.routers.user_router import user_router
 from src.routers.auth_router import auth_router
 from src.routers.room_service_router import room_service_router
 from src.routers.room_router import room_router
+from src.routers.booking_router import booking_router
 from src.exception.exception_handler import setup_exception_handler
 
 from src.data.model.user import User
@@ -14,6 +15,13 @@ from src.data.model.booking import Booking
 from src.data.model.room_service_association import room_service_association
 from src.data.model.room_service import RoomService
 from src.data.model.extra_service import ExtraService
+
+# Entità del modulo Booking: l'import le registra nel registry SQLAlchemy
+# prima della configurazione dei mapper.
+from src.data.model.booking_room_item import BookingRoomItem
+from src.data.model.booking_token import BookingToken
+from src.data.model.booking_status_history import BookingStatusHistory
+from src.data.model.stripe_event import StripeEvent
 
 app = FastAPI()
 
@@ -32,3 +40,4 @@ app.include_router(auth_router)
 app.include_router(room_service_router)
 app.include_router(room_router)
 app.include_router(extra_service_router)
+app.include_router(booking_router)

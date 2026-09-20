@@ -346,6 +346,17 @@ class BookingCancelSchema(CustomModel):
     reason: Optional[str] = Field(default=None, max_length=500)
 
 
+class OwnBookingCancelSchema(CustomModel):
+    """
+    Cancellazione da parte dell'utente autenticato intestatario.
+
+    Non richiede token: l'identità è già provata dalla sessione, e la proprietà
+    della prenotazione viene verificata dal Service.
+    """
+
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
 class BookingLookupSchema(CustomModel):
     """
     Consultazione di una prenotazione da parte di un ospite non registrato.
@@ -455,6 +466,27 @@ class BookingPublicSchema(CustomModel):
     confirmed_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class BookingCreatedSchema(CustomModel):
+    """
+    Risposta alla creazione di una prenotazione.
+
+    `confirmation_token` è valorizzato **solo quando l'invio email è
+    disattivato** (`settings.email_enabled is False`), cioè in sviluppo.
+
+    Serve a rendere collaudabile il flusso completo prima che esista
+    l'`EmailService` (Step F): senza, nessuno potrebbe confermare una
+    prenotazione e il ciclo non sarebbe verificabile end-to-end.
+
+    TODO [Step F]: con l'`EmailService` attivo il campo si spegne da sé, perché
+      `email_enabled` passa a True e il token viaggia per email. Valutare in
+      quel momento se rimuoverlo del tutto: finché resta condizionato alla
+      configurazione non è una falla, ma un campo in meno è un campo in meno.
+    """
+
+    booking: BookingPublicSchema
+    confirmation_token: Optional[str] = None
 
 
 class BookingSchema(CustomModel):

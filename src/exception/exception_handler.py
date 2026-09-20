@@ -8,7 +8,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from starlette import status
 from starlette.responses import JSONResponse
 
-from src.exception.custom_exception import AppException
+from src.exception.custom_exception import AppException, RateLimitExceeded
 
 
 #: Chiavi rimosse dal dettaglio errori prima di restituirlo al client.
@@ -128,6 +128,18 @@ def setup_exception_handler(app: FastAPI):
         return JSONResponse(
             status_code=exc.status_code,
             content={"message": exc.message},
+        )
+
+    # Handler più specifico per il rate limiting: Starlette risolve percorrendo
+    # l'MRO dell'eccezione, quindi questo prevale su quello generico e aggiunge
+    # l'header `Retry-After`, che dice al client quando ha senso riprovare.
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_exception_handler(request: Request, exc: RateLimitExceeded):
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"message": exc.message},
+            headers=headers,
         )
 
     # ------------------------------------------------------------------ #

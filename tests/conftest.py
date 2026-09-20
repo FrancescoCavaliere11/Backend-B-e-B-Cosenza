@@ -138,6 +138,43 @@ async def session(session_factory):
 
 
 @pytest_asyncio.fixture
+async def api_client(session_factory):
+    """
+    Client HTTP sull'applicazione reale, senza aprire una porta di rete.
+
+    `ASGITransport` invoca l'app in-process: le richieste attraversano
+    middleware, dipendenze, router ed exception handler esattamente come in
+    produzione, ma senza server. La dipendenza `get_async_session` è sostituita
+    per puntare al database di test, e ogni richiesta ottiene una sessione
+    propria, come avviene davvero.
+
+    I contatori del rate limiter vengono azzerati prima e dopo ogni test:
+    vivono in memoria di processo e altrimenti un test si porterebbe dietro le
+    richieste di quello precedente.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from src.config.database_config import get_async_session
+    from src.main import app
+    from src.security.rate_limiter import reset_rate_limiter
+
+    async def override_session():
+        async with session_factory() as db_session:
+            yield db_session
+
+    app.dependency_overrides[get_async_session] = override_session
+    reset_rate_limiter()
+
+    async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        yield client
+
+    app.dependency_overrides.clear()
+    reset_rate_limiter()
+
+
+@pytest_asyncio.fixture
 async def rooms(session) -> List[Room]:
     """Due camere di prova: una doppia a 100 €, una quadrupla a 140 €."""
     created = [

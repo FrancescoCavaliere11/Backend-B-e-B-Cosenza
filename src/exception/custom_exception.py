@@ -149,8 +149,19 @@ class CaptchaValidationFailed(AppException):
 
 
 class RateLimitExceeded(AppException):
+    """
+    Limite di frequenza superato.
+
+    Porta con sé i secondi di attesa suggeriti, che l'handler globale traduce
+    nell'header `Retry-After`: un client corretto può così riprovare al momento
+    giusto invece di insistere a vuoto.
+    """
     status_code = 429
     default_message = "Troppe richieste: riprova più tardi"
+
+    def __init__(self, message: Optional[str] = None, retry_after: Optional[int] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class PaymentRequired(AppException):

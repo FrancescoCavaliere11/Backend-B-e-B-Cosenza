@@ -52,6 +52,8 @@ from src.data.schemas.booking_schema import (
     BookingExtendHoldSchema,
     BookingListItemSchema,
     BookingPublicSchema,
+    BookingQuoteRequestSchema,
+    BookingQuoteResponseSchema,
     BookingRoomItemSchema,
     BookingSchema,
     BookingSearchFiltersSchema,
@@ -153,6 +155,44 @@ class BookingService:
         self.history_repository = booking_status_history_repository
         self.room_repository = room_repository
         self.pricing_service = pricing_service
+
+    # ================================================================== #
+    # Preventivo                                                         #
+    # ================================================================== #
+
+    async def build_quote(
+            self,
+            payload: BookingQuoteRequestSchema
+    ) -> BookingQuoteResponseSchema:
+        """
+        Preventivo firmato per una selezione di camere.
+
+        Operazione di sola lettura: non blocca nulla e non crea righe. La
+        disponibilità viene comunque verificata, per dare all'utente un errore
+        immediato invece di farglielo scoprire dopo aver compilato i propri
+        dati — ma la garanzia resta al momento della prenotazione: fra il
+        preventivo e la conferma qualcun altro può sempre arrivare prima.
+
+        Vive qui e non in `AvailabilityService` per riusare le stesse verifiche
+        su camere e capienza del percorso di creazione: due implementazioni che
+        col tempo divergono sarebbero peggio di una sola condivisa.
+        """
+        rooms = await self._load_and_validate_rooms(payload.room_ids)
+        self._assert_capacity(rooms, payload.guest_count)
+
+        conflicts = await self.booking_repository.get_active_overlapping_items(
+            [room.id for room in rooms], payload.check_in, payload.check_out
+        )
+        if conflicts:
+            raise RoomNotAvailable(self._describe_conflicts(conflicts))
+
+        return self.pricing_service.build_quote(
+            rooms=rooms,
+            check_in=payload.check_in,
+            check_out=payload.check_out,
+            guest_count=payload.guest_count,
+            payment_option=payload.payment_option,
+        )
 
     # ================================================================== #
     # Creazione                                                          #

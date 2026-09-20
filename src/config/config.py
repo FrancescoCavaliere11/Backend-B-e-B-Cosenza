@@ -83,6 +83,19 @@ class Settings(BaseSettings):
     rate_limit_availability_per_ip_minute: int = 20
     rate_limit_confirm_per_ip_hour: int = 10
 
+    #: Numero di reverse proxy di cui fidarsi davanti all'applicazione.
+    #:
+    #: `0` (default) ignora `X-Forwarded-For` e usa l'IP del socket: corretto in
+    #: sviluppo e quando l'app è esposta direttamente. Con un valore `N` si
+    #: prende l'N-esimo indirizzo **da destra** nella catena, cioè quello
+    #: scritto dal proxy più interno di cui ci si fida.
+    #:
+    #: Va alzato solo dopo aver messo davvero un proxy davanti: quell'header lo
+    #: scrive il client, e fidarsene senza un proxy che lo riscriva significa
+    #: consentire a chiunque di cambiare IP a ogni richiesta e azzerare il
+    #: rate limiting.
+    trusted_proxy_count: int = 0
+
     # --- Email (SMTP) --------------------------------------------------------
     email_enabled: bool = False
     smtp_host: Optional[str] = None
