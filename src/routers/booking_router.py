@@ -266,19 +266,24 @@ async def create_user_booking(
 
 
 @booking_router.post(
-    "/me/{booking_id}/cancel",
+    "/me/{code}/cancel",
     response_model=BookingPublicSchema,
     summary="Cancella una mia prenotazione",
 )
 async def cancel_my_booking(
-        booking_id: UUID,
+        code: str,
         payload: OwnBookingCancelSchema,
         current_user: Annotated[User, Depends(get_current_user)],
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingPublicSchema:
     """
+    La prenotazione è identificata dal **codice** (es. `BB-2026-A7K3QX`), non
+    dall'identificativo interno: `BookingPublicSchema` non espone `id`, quindi
+    un client non avrebbe modo di procurarselo. Il codice è l'unico riferimento
+    pubblico di una prenotazione.
+
     Una prenotazione di un altro utente risponde `404`, non `403`: distinguere
-    i due casi confermerebbe l'esistenza dell'identificativo e consentirebbe di
-    sondare le prenotazioni altrui.
+    i due casi confermerebbe l'esistenza del codice e consentirebbe di sondare
+    le prenotazioni altrui.
     """
-    return await service.cancel_own_booking(booking_id, current_user, payload.reason)
+    return await service.cancel_own_booking(code, current_user, payload.reason)

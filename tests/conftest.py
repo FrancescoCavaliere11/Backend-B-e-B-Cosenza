@@ -174,6 +174,73 @@ async def api_client(session_factory):
     reset_rate_limiter()
 
 
+#: Password usata dagli utenti di prova. Rispetta i validatori del progetto:
+#: maiuscola, minuscola, cifra e carattere speciale.
+TEST_PASSWORD = "Password1!"
+
+
+async def _create_user(session, email: str, phone: str, role) -> "User":
+    from src.data.model.user import User
+    from src.security.password_handler import get_password_hash
+
+    user = User(
+        firstname="Utente",
+        lastname="Prova",
+        email=email,
+        phone_number=phone,
+        password=get_password_hash(TEST_PASSWORD),
+        role=role,
+        created_by="System",
+        last_updated_by="System",
+    )
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+@pytest_asyncio.fixture
+async def admin_user(session):
+    from src.data.enumerators import UserRole
+
+    return await _create_user(session, "admin@example.com", "3330000001", UserRole.admin)
+
+
+@pytest_asyncio.fixture
+async def regular_user(session):
+    from src.data.enumerators import UserRole
+
+    return await _create_user(session, "utente@example.com", "3330000002", UserRole.user)
+
+
+async def _login(client, email: str):
+    """
+    Esegue un login reale e lascia che il client conservi i cookie.
+
+    Si passa dall'endpoint vero invece di sovrascrivere `get_current_user`:
+    così i test attraversano l'intera catena di autenticazione e verificano
+    anche che `is_admin_user` respinga davvero chi non è amministratore —
+    cosa che con una dipendenza finta non sapremmo.
+    """
+    response = await client.post(
+        "/api/v1/auth/token", data={"username": email, "password": TEST_PASSWORD}
+    )
+    assert response.status_code == 200, response.text
+    return client
+
+
+@pytest_asyncio.fixture
+async def admin_client(api_client, admin_user):
+    """Client autenticato come amministratore."""
+    return await _login(api_client, admin_user.email)
+
+
+@pytest_asyncio.fixture
+async def user_client(api_client, regular_user):
+    """Client autenticato come utente normale. Serve a verificare i 403."""
+    return await _login(api_client, regular_user.email)
+
+
 @pytest_asyncio.fixture
 async def rooms(session) -> List[Room]:
     """Due camere di prova: una doppia a 100 €, una quadrupla a 140 €."""

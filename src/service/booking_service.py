@@ -48,6 +48,7 @@ from src.data.repository.booking_token_repository import BookingTokenRepository
 from src.data.repository.room_repository import RoomRepository
 from src.data.schemas.booking_schema import (
     AdminBookingCreateSchema,
+    AdminBookingUpdateSchema,
     AdminPaymentRegistrationSchema,
     BookingExtendHoldSchema,
     BookingListItemSchema,
@@ -67,6 +68,7 @@ from src.exception.custom_exception import (
     AppException,
     BookingHoldExpired,
     BookingNotCancellable,
+    ConcurrentModification,
     EntityNotFound,
     InvalidBookingStatusTransition,
     InvalidBookingToken,
@@ -418,21 +420,9 @@ class BookingService:
 
         room_ids = [room.id for room in rooms]
 
-        # 1. Lock pessimistico, in ordine di id: nessun deadlock possibile.
-        await self.booking_repository.lock_rooms_for_update(room_ids)
-
-        # 2. Just-in-time expiration: libera gli slot il cui blocco è scaduto,
-        #    così il vincolo del database non respinge una prenotazione
-        #    legittima solo perché lo sweeper non è ancora passato.
-        await self.booking_repository.deactivate_expired_holds(room_ids)
-
-        # 3. Verifica applicativa: serve a produrre un errore leggibile, non a
-        #    garantire la correttezza. Quella la dà il passo 5.
-        conflicts = await self.booking_repository.get_active_overlapping_items(
-            room_ids, quote.check_in, quote.check_out
-        )
-        if conflicts:
-            raise RoomNotAvailable(self._describe_conflicts(conflicts))
+        # Lock, liberazione degli hold scaduti e verifica disponibilità:
+        # condiviso con la modifica amministrativa (vedi `_secure_slots`).
+        await self._secure_slots(room_ids, quote.check_in, quote.check_out)
 
         now = datetime.now(timezone.utc)
         booking = Booking(
@@ -636,26 +626,33 @@ class BookingService:
 
     async def cancel_own_booking(
             self,
-            booking_id: UUID,
+            code: str,
             user: User,
             reason: Optional[str] = None
     ) -> BookingPublicSchema:
-        """Cancellazione da parte dell'utente autenticato intestatario."""
+        """
+        Cancellazione da parte dell'utente autenticato intestatario.
+
+        Identifica la prenotazione tramite il **codice**, non l'identificativo
+        interno: `BookingPublicSchema` non espone `id`, quindi un client non
+        avrebbe modo di procurarselo. Il codice è l'unico riferimento pubblico
+        di una prenotazione, ed è quello che l'utente vede.
+        """
         return await self._in_transaction(
-            lambda: self._execute_cancel_own(booking_id, user, reason)
+            lambda: self._execute_cancel_own(code, user, reason)
         )
 
     async def _execute_cancel_own(
             self,
-            booking_id: UUID,
+            code: str,
             user: User,
             reason: Optional[str]
     ) -> BookingPublicSchema:
-        booking = await self.booking_repository.get_by_id(booking_id, with_items=True)
+        booking = await self.booking_repository.get_by_code(code, with_items=True)
 
         # Risposta identica a "non esiste" quando la prenotazione è di un
-        # altro utente: confermarne l'esistenza consentirebbe di sondare gli
-        # identificativi altrui.
+        # altro utente: confermarne l'esistenza consentirebbe di sondare i
+        # codici altrui.
         if booking is None or booking.user_id != user.id:
             raise EntityNotFound("Prenotazione non trovata")
 
@@ -807,9 +804,171 @@ class BookingService:
 
         return await self._to_admin_schema(booking)
 
+    async def admin_update_booking(
+            self,
+            booking_id: UUID,
+            payload: AdminBookingUpdateSchema,
+            admin_id: UUID
+    ) -> BookingSchema:
+        """
+        Modifica una prenotazione esistente: date, camere, ospiti, anagrafica, note.
+
+        È l'operazione più delicata dopo la creazione, perché può spostare uno
+        slot già occupato su un altro. Riusa lo stesso `_secure_slots` della
+        creazione, con l'accortezza di **escludere la prenotazione stessa**:
+        senza, una prenotazione che si allunga di un giorno collidererebbe con
+        le proprie righe e si rifiuterebbe da sola.
+        """
+        return await self._in_transaction(
+            lambda: self._execute_admin_update(booking_id, payload, admin_id)
+        )
+
+    async def _execute_admin_update(
+            self,
+            booking_id: UUID,
+            payload: AdminBookingUpdateSchema,
+            admin_id: UUID
+    ) -> BookingSchema:
+        booking = await self.booking_repository.get_by_id(
+            booking_id, with_items=True, with_history=True
+        )
+        if booking is None:
+            raise EntityNotFound("Prenotazione non trovata")
+
+        # Optimistic locking lato client: il valore arriva dalla GET che
+        # l'operatore ha fatto prima di aprire il form.
+        if booking.version != payload.version:
+            raise ConcurrentModification()
+
+        if booking.status.is_terminal:
+            raise InvalidBookingStatusTransition(
+                f"Una prenotazione in stato '{booking.status.value}' non è più modificabile"
+            )
+
+        rooms = await self._load_and_validate_rooms(payload.room_ids)
+        self._assert_capacity(rooms, payload.guest_count)
+
+        previous_check_in = booking.check_in
+        previous_check_out = booking.check_out
+        previous_room_ids = {item.room_id for item in booking.items}
+
+        dates_changed = (
+            booking.check_in != payload.check_in or booking.check_out != payload.check_out
+        )
+        rooms_changed = previous_room_ids != {room.id for room in rooms}
+
+        if dates_changed or rooms_changed:
+            await self._secure_slots(
+                [room.id for room in rooms],
+                payload.check_in,
+                payload.check_out,
+                exclude_booking_id=booking.id,
+            )
+            await self._rebuild_items(booking, rooms, payload)
+
+        booking.guest_count = payload.guest_count
+        booking.admin_notes = payload.admin_notes
+
+        if payload.guest is not None:
+            booking.guest_firstname = payload.guest.firstname
+            booking.guest_lastname = payload.guest.lastname
+            booking.guest_email = str(payload.guest.email)
+            booking.guest_phone = payload.guest.phone_number
+
+        if dates_changed and booking.status == BookingStatus.CONFIRMED:
+            booking.cancellation_deadline = self.pricing_service.compute_cancellation_deadline(
+                booking.check_in, booking.payment_option
+            )
+
+        # Lo storico registra anche le modifiche che non cambiano stato: "chi
+        # ha spostato le date" è esattamente l'informazione che serve in caso
+        # di contestazione con l'ospite.
+        self.history_repository.add(
+            booking_id=booking.id,
+            from_status=booking.status,
+            to_status=booking.status,
+            actor_type=AuditActorType.ADMIN,
+            actor_id=str(admin_id),
+            reason=self._describe_update(
+                payload, previous_check_in, previous_check_out,
+                previous_room_ids, {room.id for room in rooms}
+            ),
+        )
+
+        apply_audit_fields(audit=booking, user_id=admin_id)
+
+        try:
+            await self.booking_repository.flush()
+        except IntegrityError as error:
+            if self._is_overlap_violation(error):
+                raise RoomNotAvailable() from error
+            raise
+
+        return await self._to_admin_schema(booking)
+
+    async def _rebuild_items(
+            self,
+            booking: Booking,
+            rooms: Sequence[Room],
+            payload: AdminBookingUpdateSchema
+    ) -> None:
+        """
+        Ricostruisce le righe camera e ricalcola gli importi.
+
+        Le righe vecchie vengono cancellate e svuotate **prima** di toccare le
+        date della prenotazione: la foreign key composita propaga le date ai
+        figli con `ON UPDATE CASCADE`, e aggiornare righe che stiamo per
+        eliminare produrrebbe un ordine di operazioni inutilmente fragile.
+
+        Le nuove righe nascono con le date nuove; l'INSERT finale è il punto in
+        cui l'exclusion constraint verifica che lo spostamento sia legittimo.
+        """
+        for item in list(booking.items):
+            booking.items.remove(item)
+        await self.booking_repository.flush()
+
+        booking.check_in = payload.check_in
+        booking.check_out = payload.check_out
+
+        nights = self.pricing_service.calculate_nights(payload.check_in, payload.check_out)
+        lines = self.pricing_service.build_price_lines(rooms, nights)
+        base_price, discount_amount, total_price = self.pricing_service.compute_totals(
+            lines, booking.payment_option
+        )
+
+        booking.base_price = base_price
+        booking.discount_amount = discount_amount
+        booking.total_price = total_price
+
+        lines_by_room = {line.room_id: line for line in lines}
+        for room in rooms:
+            line = lines_by_room[room.id]
+            booking.items.append(
+                BookingRoomItem(
+                    room_id=room.id,
+                    check_in=payload.check_in,
+                    check_out=payload.check_out,
+                    unit_price=line.unit_price,
+                    nights=nights,
+                    line_total=line.line_total,
+                )
+            )
+
+        self._sync_items_active_flag(booking)
+
     # ================================================================== #
     # Letture                                                            #
     # ================================================================== #
+
+    async def get_admin_booking(self, booking_id: UUID) -> BookingSchema:
+        """Dettaglio completo con timeline degli stati, per il back-office."""
+        booking = await self.booking_repository.get_by_id(
+            booking_id, with_items=True, with_history=True
+        )
+        if booking is None:
+            raise EntityNotFound("Prenotazione non trovata")
+
+        return await self._to_admin_schema(booking)
 
     async def lookup(self, code: str, email: str) -> BookingPublicSchema:
         """Consultazione da parte di un ospite non registrato (codice + email)."""
@@ -977,15 +1136,101 @@ class BookingService:
 
     async def _in_transaction(self, operation):
         """
-        Esegue l'operazione dentro una transazione, aprendone una solo se non
-        ce n'è già una attiva. Permette di comporre più operazioni del Service
-        nella stessa unità atomica.
-        """
-        if self.session.in_transaction():
-            return await operation()
+        Esegue l'operazione come unità atomica: commit in caso di successo,
+        rollback a fronte di qualunque eccezione.
 
-        async with self.session.begin():
-            return await operation()
+        ⚠️ **Non si usa `session.in_transaction()` per decidere se aprire una
+        transazione.** SQLAlchemy 2.0 ha l'autobegin: una transazione si apre
+        da sola alla **prima query**, anche di sola lettura. La dipendenza di
+        autenticazione interroga la tabella utenti prima ancora di entrare
+        nell'endpoint, quindi su ogni rotta protetta la sessione risulta già
+        "in transazione". Il pattern `if in_transaction(): ... else: begin()`
+        concludeva perciò che il commit spettasse a qualcun altro — e la
+        scrittura non veniva mai persistita. Silenziosamente: la risposta HTTP
+        era `201`, ma a database non restava nulla.
+
+        Qui la transazione viene chiusa esplicitamente, senza ipotesi su chi
+        l'abbia aperta.
+        """
+        try:
+            result = await operation()
+            await self.session.commit()
+            return result
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def _secure_slots(
+            self,
+            room_ids: Sequence[UUID],
+            check_in,
+            check_out,
+            exclude_booking_id: Optional[UUID] = None
+    ) -> None:
+        """
+        Acquisisce gli slot richiesti dentro la transazione in corso.
+
+        Tre passi, in quest'ordine preciso:
+
+        1. **lock pessimistico** sulle camere, ordinato per id — due
+           transazioni che bloccano le stesse camere in ordine diverso si
+           attenderebbero a vicenda, ordinando sempre allo stesso modo il
+           deadlock è impossibile;
+        2. **just-in-time expiration** — libera gli slot il cui blocco è
+           scaduto, così il vincolo del database non respinge una prenotazione
+           legittima solo perché lo sweeper non è ancora passato;
+        3. **verifica applicativa** — serve a produrre un `409` leggibile con
+           i nomi delle camere, non a garantire la correttezza: quella la dà
+           l'exclusion constraint all'INSERT.
+
+        Condiviso da creazione e modifica: due implementazioni di questo punto
+        sarebbero destinate a divergere, e divergerebbero proprio dove fa più
+        male.
+
+        :param exclude_booking_id: prenotazione da ignorare nel calcolo dei
+            conflitti. Indispensabile in modifica: senza, una prenotazione che
+            si allunga collidererebbe con le proprie righe.
+        """
+        ids = list(room_ids)
+        if not ids:
+            return
+
+        await self.booking_repository.lock_rooms_for_update(ids)
+        await self.booking_repository.deactivate_expired_holds(ids)
+
+        conflicts = await self.booking_repository.get_active_overlapping_items(
+            ids, check_in, check_out, exclude_booking_id=exclude_booking_id
+        )
+        if conflicts:
+            raise RoomNotAvailable(self._describe_conflicts(conflicts))
+
+    @staticmethod
+    def _describe_update(
+            payload: AdminBookingUpdateSchema,
+            previous_check_in,
+            previous_check_out,
+            previous_room_ids,
+            new_room_ids
+    ) -> str:
+        """Compone la descrizione della modifica registrata nello storico."""
+        changes: List[str] = []
+
+        if previous_check_in != payload.check_in or previous_check_out != payload.check_out:
+            changes.append(
+                f"date da {previous_check_in}/{previous_check_out} "
+                f"a {payload.check_in}/{payload.check_out}"
+            )
+
+        if previous_room_ids != new_room_ids:
+            changes.append(f"camere da {len(previous_room_ids)} a {len(new_room_ids)}")
+
+        description = "Modifica amministrativa"
+        if changes:
+            description += ": " + ", ".join(changes)
+        if payload.reason:
+            description += f" — {payload.reason}"
+
+        return description[:500]
 
     async def _load_and_validate_rooms(self, room_ids: Sequence[UUID]) -> List[Room]:
         rooms = await self.room_repository.get_all_by_ids(list(room_ids))
@@ -1179,5 +1424,9 @@ class BookingService:
             updated_at=booking.updated_at,
             created_by=booking.created_by,
             last_updated_by=booking.last_updated_by,
+            # Contatore dell'optimistic locking: SQLAlchemy lo mantiene in
+            # memoria e lo aggiorna dopo ogni flush, quindi non va ricaricato
+            # come created_at/updated_at.
+            version=booking.version,
             status_history=history,
         )

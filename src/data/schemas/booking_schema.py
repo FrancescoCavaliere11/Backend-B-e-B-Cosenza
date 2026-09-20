@@ -530,9 +530,72 @@ class BookingSchema(CustomModel):
     created_by: str
     last_updated_by: str
 
+    #: Contatore di versione per l'optimistic locking. Il client lo rilegge e
+    #: lo rimanda in `AdminBookingUpdateSchema`: se nel frattempo qualcun altro
+    #: ha salvato, la modifica viene respinta invece di sovrascriverlo.
+    #: Volutamente assente da `BookingPublicSchema`: all'ospite non serve.
+    version: int
+
     status_history: List[BookingStatusHistorySchema] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AdminBookingUpdateSchema(CustomModel):
+    """
+    Modifica di una prenotazione esistente dal back-office.
+
+    Copre il caso più frequente del banco: l'ospite telefona per spostare il
+    soggiorno o cambiare camera. Senza questa operazione l'unica via sarebbe
+    cancellare e rifare, perdendo codice prenotazione, storico e anagrafica.
+
+    `version` implementa l'**optimistic locking** lato client: è il valore letto
+    con `GET /{id}` e va rimandato invariato. Se nel frattempo un altro
+    operatore ha salvato, la modifica viene respinta con `409` invece di
+    sovrascrivere il suo lavoro.
+
+    L'opzione di pagamento **non è modificabile** qui: cambiarla altererebbe
+    prezzo, politica di cancellazione e stato dell'incasso insieme. Se serve,
+    si annulla e si ricrea.
+    """
+
+    version: int = Field(ge=1, description="Valore letto con GET, per l'optimistic locking")
+
+    check_in: date
+    check_out: date
+    guest_count: int = Field(ge=1, le=_MAX_GUEST_COUNT)
+    room_ids: List[UUID]
+
+    #: Se omesso, l'anagrafica resta quella registrata alla prenotazione.
+    guest: Optional[GuestDataSchema] = None
+    admin_notes: Optional[str] = Field(default=None, max_length=2000)
+
+    #: Motivazione della modifica, registrata nello storico della prenotazione.
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("room_ids")
+    @classmethod
+    def validate_rooms(cls, value: List[UUID]) -> List[UUID]:
+        return validate_room_ids_list(value)
+
+    @model_validator(mode="after")
+    def validate_dates(self) -> "AdminBookingUpdateSchema":
+        # `allow_past=True` come in creazione: il back-office deve poter
+        # correggere anche soggiorni già iniziati.
+        validate_booking_date_range(self.check_in, self.check_out, allow_past=True)
+        return self
+
+
+class AdminBookingCreatedSchema(CustomModel):
+    """
+    Risposta alla creazione amministrativa.
+
+    Porta la vista completa, non quella pubblica: l'admin deve vedere audit,
+    canale di origine e note interne.
+    """
+
+    booking: BookingSchema
+    confirmation_token: Optional[str] = None
 
 
 class BookingListItemSchema(CustomModel):

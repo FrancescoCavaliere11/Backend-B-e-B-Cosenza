@@ -7,6 +7,7 @@ from src.routers.auth_router import auth_router
 from src.routers.room_service_router import room_service_router
 from src.routers.room_router import room_router
 from src.routers.booking_router import booking_router
+from src.routers.admin_booking_router import admin_booking_router
 from src.exception.exception_handler import setup_exception_handler
 
 from src.data.model.user import User
@@ -41,3 +42,4 @@ app.include_router(room_service_router)
 app.include_router(room_router)
 app.include_router(extra_service_router)
 app.include_router(booking_router)
+app.include_router(admin_booking_router)

@@ -33,4 +33,4 @@ __pycache__/
 *.ntvs*
 *.njsproj
 *.sln
-*.swp
+*.swp.DS_Store

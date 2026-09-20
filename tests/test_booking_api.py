@@ -262,6 +262,86 @@ async def test_creazione_utente_richiede_autenticazione(api_client):
     assert response.status_code == 401
 
 
+async def test_prenotazione_utente_autenticato_viene_persistita(
+        user_client, rooms, regular_user
+):
+    """
+    Verifica che la prenotazione **sopravviva alla richiesta**.
+
+    Un `201` da solo non basta come prova. Fino allo Step E questo endpoint
+    rispondeva correttamente ma non scriveva nulla: la dipendenza di
+    autenticazione apriva una transazione per leggere l'utente, e il Service —
+    vedendo la sessione già "in transazione" — concludeva che il commit
+    spettasse a qualcun altro.
+
+    L'unico modo per accorgersene è rileggere in una **richiesta successiva**,
+    che usa una sessione diversa. Un assert sul corpo della risposta alla
+    creazione non avrebbe visto niente di sbagliato.
+    """
+    quote = await _get_quote(user_client, rooms[0].id)
+
+    creata = await user_client.post(
+        f"{BASE}/me",
+        json={"quote_token": quote["quote_token"], "accept_terms": True},
+    )
+    assert creata.status_code == 201, creata.text
+    booking = creata.json()["booking"]
+
+    # L'anagrafica viene copiata dal profilo, non richiesta all'utente.
+    assert booking["guest_email"] == regular_user.email
+    assert booking["guest_firstname"] == regular_user.firstname
+    assert booking["status"] == "PENDING_CONFIRMATION"
+
+    # Richiesta separata, sessione diversa: se il commit non fosse avvenuto,
+    # qui non ci sarebbe nulla.
+    elenco = await user_client.get(f"{BASE}/me")
+    assert elenco.status_code == 200
+    assert booking["code"] in [item["code"] for item in elenco.json()]
+
+
+async def test_utente_cancella_la_propria_prenotazione(user_client, rooms):
+    """
+    La cancellazione usa il **codice**, non l'identificativo interno: è l'unico
+    riferimento che il client possiede, perché la vista pubblica non espone
+    `id`.
+    """
+    quote = await _get_quote(user_client, rooms[0].id)
+    booking = (
+        await user_client.post(
+            f"{BASE}/me",
+            json={"quote_token": quote["quote_token"], "accept_terms": True},
+        )
+    ).json()["booking"]
+
+    response = await user_client.post(
+        f"{BASE}/me/{booking['code']}/cancel", json={"reason": "Cambio programma"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "CANCELLED"
+
+    # Anche la cancellazione deve essere persistita.
+    elenco = await user_client.get(f"{BASE}/me")
+    cancellata = next(b for b in elenco.json() if b["code"] == booking["code"])
+    assert cancellata["status"] == "CANCELLED"
+
+
+async def test_non_si_cancella_la_prenotazione_di_un_altro(user_client, api_client, rooms):
+    """Una prenotazione altrui risponde `404`, non `403`."""
+    quote = await _get_quote(api_client, rooms[0].id)
+    altrui = (
+        await api_client.post(
+            f"{BASE}/",
+            json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+        )
+    ).json()["booking"]
+
+    response = await user_client.post(
+        f"{BASE}/me/{altrui['code']}/cancel", json={"reason": "Tentativo"}
+    )
+    assert response.status_code == 404
+
+
 # ===========================================================================
 # Consultazione
 # ===========================================================================

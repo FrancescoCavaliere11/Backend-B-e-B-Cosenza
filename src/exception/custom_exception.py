@@ -164,6 +164,24 @@ class RateLimitExceeded(AppException):
         self.retry_after = retry_after
 
 
+class ConcurrentModification(AppException):
+    """
+    Il dato è stato modificato da qualcun altro fra la lettura e la scrittura.
+
+    Diversa da `StaleDataError` di SQLAlchemy, che scatta su scritture
+    concorrenti nella stessa transazione: questa copre il caso reale del
+    back-office, in cui due operatori aprono la stessa prenotazione e uno
+    salva dieci minuti dopo l'altro. Il client presenta la `version` che ha
+    letto; se non coincide con quella a database, la modifica viene respinta
+    invece di sovrascrivere silenziosamente.
+    """
+    status_code = 409
+    default_message = (
+        "La prenotazione è stata modificata da un altro operatore. "
+        "Ricarica i dati e riprova."
+    )
+
+
 class PaymentRequired(AppException):
     status_code = 402
     default_message = "È necessario completare il pagamento per confermare la prenotazione"

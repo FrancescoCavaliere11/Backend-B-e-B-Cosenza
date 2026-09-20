@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → D
+Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → E
 
 ---
 
@@ -101,6 +101,7 @@ Il backend non espone mai stack trace. Ogni eccezione di dominio deriva da `AppE
 | `InvalidGuestCount` | 422 | Il numero di ospiti non è compatibile con le camere |
 | `InvalidQuoteToken` | 422 | Il preventivo non è più valido |
 | `CaptchaValidationFailed` | 422 | Verifica anti-bot non superata |
+| `ConcurrentModification` | 409 | La prenotazione è stata modificata da un altro operatore |
 | `RateLimitExceeded` | 429 | Troppe richieste: riprova più tardi |
 | `InvalidFileType` / `InvalidFileSize` | 422 | — |
 | `StaleDataError` *(SQLAlchemy)* | 409 | Il dato è stato modificato da un'altra operazione |
@@ -260,7 +261,19 @@ Correzione importante introdotta allo Step B: gli errori di validazione producev
 | 6 | `POST` | `/api/v1/bookings/lookup` | Pubblico | 10/h IP | no |
 | 7 | `GET` | `/api/v1/bookings/me` | Autenticato | — | no |
 | 8 | `POST` | `/api/v1/bookings/me` | Autenticato | — | no |
-| 9 | `POST` | `/api/v1/bookings/me/{booking_id}/cancel` | Autenticato | — | no |
+| 9 | `POST` | `/api/v1/bookings/me/{code}/cancel` | Autenticato | — | no |
+
+**Area amministrativa**, sotto `/api/v1/admin/bookings` — tutti con accesso **admin**:
+
+| # | Metodo | Rotta | Scopo |
+|:-:|:--|:--|:--|
+| 10 | `GET` | `/` | Elenco filtrato e paginato |
+| 11 | `GET` | `/{booking_id}` | Dettaglio completo con timeline |
+| 12 | `POST` | `/` | Creazione per conto di terzi |
+| 13 | `PATCH` | `/{booking_id}` | Modifica date, camere, ospiti, note |
+| 14 | `POST` | `/{booking_id}/status` | Transizione di stato |
+| 15 | `POST` | `/{booking_id}/payment` | Registrazione incasso manuale |
+| 16 | `POST` | `/{booking_id}/extend-hold` | Proroga del blocco temporaneo |
 
 ---
 
@@ -492,24 +505,202 @@ Ordinate per data di arrivo decrescente.
 
 Lo snapshot anagrafico resta comunque congelato: una modifica successiva all'account non altera la prenotazione.
 
-**Test**: `test_creazione_utente_richiede_autenticazione`.
+**Test**: `test_creazione_utente_richiede_autenticazione`, `test_prenotazione_utente_autenticato_viene_persistita`.
+
+> Quest'ultimo rilegge la prenotazione in una **richiesta successiva**, non solo nel corpo della risposta: è l'unico modo per accorgersi di un mancato commit. Vedi §11.2.
 
 ---
 
-### 9 · `POST /api/v1/bookings/me/{booking_id}/cancel`
+### 9 · `POST /api/v1/bookings/me/{code}/cancel`
 
 **Cancella una propria prenotazione.**
 
 | | |
 |:--|:--|
 | **Accesso** | **Autenticato** |
-| **Path** | `booking_id` (UUID) |
-| **Body** | `OwnBookingCancelSchema` |
+| **Path** | `code` — codice prenotazione, es. `BB-2026-A7K3QX` |
+| **Body** | `OwnBookingCancelSchema` — solo `reason` opzionale, nessun token |
 | **Risposta** | `BookingPublicSchema` |
 
 **Codici**: `200` · `401` · `404` inesistente **o di un altro utente** · `409` non cancellabile
 
-> **Perché `404` e non `403`** su una prenotazione altrui: distinguere i due casi confermerebbe l'esistenza dell'identificativo e consentirebbe di sondare le prenotazioni di altri utenti.
+> **Si identifica col codice, non con l'`id`.** `BookingPublicSchema` non espone l'identificativo interno, quindi un client non avrebbe modo di procurarselo: il codice è l'unico riferimento pubblico di una prenotazione, ed è quello che l'utente legge nella conferma.
+
+> **Perché `404` e non `403`** su una prenotazione altrui: distinguere i due casi confermerebbe l'esistenza del codice e consentirebbe di sondare le prenotazioni di altri utenti.
+
+**Test**: `test_utente_cancella_la_propria_prenotazione`, `test_non_si_cancella_la_prenotazione_di_un_altro`.
+
+---
+
+## 4bis. Endpoint amministrativi
+
+Tutte le rotte sotto `/api/v1/admin/bookings` richiedono un utente con
+`role = admin`. Senza cookie di sessione rispondono `401`, con un utente
+`role = user` rispondono `403`.
+
+---
+
+### 10 · `GET /api/v1/admin/bookings/`
+
+**Elenco filtrato e paginato.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Query** | `status` (ripetibile) · `date_from` · `date_to` · `email` · `code` · `room_id` · `page` (default 1) · `page_size` (default 20, max 100) |
+| **Risposta** | `PaginatedBookingsSchema` |
+
+**Codici**: `200` · `401` · `403` · `422` intervallo di date incoerente o `page_size` oltre il limite
+
+**Logica.** Ordinate per data di arrivo decrescente, poi per creazione. `date_from` seleziona i soggiorni che **terminano dopo** quella data e `date_to` quelli che **iniziano prima**: insieme individuano i soggiorni che si sovrappongono all'intervallo, non solo quelli interamente contenuti.
+
+Il filtro `status` si ripete per selezionarne più di uno: `?status=CONFIRMED&status=CHECKED_IN`.
+
+Le righe camera sono caricate con `selectinload`: una query aggiuntiva per l'intera pagina, non una per prenotazione.
+
+**Test**: `TestRead::test_elenco_paginato`, `test_filtro_per_stato`, `test_filtro_per_email`, `test_intervallo_di_date_invertito_rifiutato`.
+
+```bash
+curl -i -b cookies.txt "http://localhost:8000/api/v1/admin/bookings/?status=CONFIRMED&page=1&page_size=20"
+```
+
+---
+
+### 11 · `GET /api/v1/admin/bookings/{booking_id}`
+
+**Dettaglio completo con timeline degli stati.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Risposta** | `BookingSchema` |
+
+**Codici**: `200` · `401` · `403` · `404`
+
+**Logica.** Vista completa: audit, canale di origine, note interne, riferimenti di pagamento e `status_history` con ogni transizione, attore e motivazione.
+
+> Il campo **`version`** restituito qui va rimandato nella `PATCH`. È quello che impedisce a due operatori di sovrascriversi a vicenda.
+
+**Test**: `TestRead::test_dettaglio_con_storico`, `test_dettaglio_inesistente`.
+
+---
+
+### 12 · `POST /api/v1/admin/bookings/`
+
+**Creazione per conto di terzi.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Body** | `AdminBookingCreateSchema` |
+| **Risposta** | `AdminBookingCreatedSchema` — **201** |
+
+**Codici**: `201` · `401` · `403` · `404` utente o camera inesistenti · `409` slot occupato · `422` validazione
+
+**Logica.** L'intestatario è un utente registrato (`user_id`) **oppure** un profilo inserito a mano (`guest`), mai entrambi né nessuno dei due.
+
+Con `skip_email_confirmation` attivo — il default — la prenotazione nasce già `CONFIRMED`, senza token e senza blocco temporaneo: è il caso della prenotazione telefonica, dove l'identità è già stata verificata parlando con l'ospite. Disattivandolo si ottiene il flusso normale con conferma via email.
+
+Non serve un preventivo firmato: l'admin è un attore fidato e il prezzo è calcolato dal server. Il percorso di creazione è però **lo stesso del canale pubblico** — lock, liberazione hold scaduti, verifica, exclusion constraint — quindi anche l'admin non può creare overbooking.
+
+Sono consentite **date nel passato**, per registrare a posteriori un walk-in o correggere un errore.
+
+> ⚠️ **Frontend**: quando la data di arrivo è precedente a oggi, mostrare un dialog di conferma esplicito prima di inviare. Il backend lo consente di proposito, quindi l'unica difesa contro il refuso di digitazione è quell'avviso.
+
+**Test**: l'intera classe `TestCreate` (7 test).
+
+---
+
+### 13 · `PATCH /api/v1/admin/bookings/{booking_id}`
+
+**Modifica di date, camere, ospiti, anagrafica e note.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Body** | `AdminBookingUpdateSchema` |
+| **Risposta** | `BookingSchema` |
+
+**Codici**: `200` · `401` · `403` · `404` · `409` version obsoleto, slot occupato, stato terminale · `422` validazione
+
+**Logica.** Copre il caso più frequente del banco: l'ospite telefona per spostare il soggiorno o cambiare camera. Senza questa operazione l'unica via sarebbe cancellare e rifare, perdendo codice, storico e anagrafica.
+
+1. verifica `version` → `409` se un altro operatore ha già salvato;
+2. rifiuta se lo stato è terminale (`CANCELLED`, `EXPIRED`, `COMPLETED`, `NO_SHOW`);
+3. se cambiano date o camere: lock, liberazione hold scaduti, verifica disponibilità **escludendo la prenotazione stessa**, ricalcolo del prezzo, ricostruzione delle righe camera;
+4. aggiorna ospiti, anagrafica e note;
+5. ricalcola il termine di cancellazione se le date sono cambiate;
+6. registra la modifica nello storico con la motivazione.
+
+L'esclusione al punto 3 non è un dettaglio: senza, una prenotazione che si allunga di un giorno collidererebbe con le proprie righe e si rifiuterebbe da sola.
+
+**L'opzione di pagamento non è modificabile** qui: cambiarla altererebbe prezzo, politica di cancellazione e stato dell'incasso insieme. Se serve, si annulla e si ricrea.
+
+**Test**: l'intera classe `TestUpdate` (8 test), fra cui `test_version_obsoleto_rifiutato` e `test_allungamento_di_un_giorno_non_collide_con_se_stessa`.
+
+---
+
+### 14 · `POST /api/v1/admin/bookings/{booking_id}/status`
+
+**Transizione di stato.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Body** | `BookingStatusUpdateSchema` |
+| **Risposta** | `BookingSchema` |
+
+**Codici**: `200` · `401` · `403` · `404` · `409` transizione non ammessa o incoerente con le date · `422` motivazione mancante sull'annullamento
+
+**Logica.** Oltre alle transizioni della macchina a stati, valgono tre controlli temporali che intercettano i refusi più comuni del back-office:
+
+| Transizione | Vincolo |
+|:--|:--|
+| → `CHECKED_IN` | non prima della data di arrivo |
+| → `NO_SHOW` | non prima che l'ospite fosse atteso |
+| → `COMPLETED` | non prima della data di partenza |
+
+L'annullamento libera **immediatamente** lo slot.
+
+**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`.
+
+---
+
+### 15 · `POST /api/v1/admin/bookings/{booking_id}/payment`
+
+**Registrazione di un incasso manuale.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Body** | `AdminPaymentRegistrationSchema` |
+| **Risposta** | `BookingSchema` |
+
+**Codici**: `200` · `401` · `403` · `404` · `422`
+
+**Logica.** Per gli incassi in struttura: contanti, POS, bonifico. I pagamenti online passano dal webhook Stripe (Step G) e non vanno registrati da qui.
+
+**Test**: `TestOperations::test_registrazione_incasso`.
+
+---
+
+### 16 · `POST /api/v1/admin/bookings/{booking_id}/extend-hold`
+
+**Proroga del blocco temporaneo.**
+
+| | |
+|:--|:--|
+| **Accesso** | Amministrativo |
+| **Body** | `BookingExtendHoldSchema` — `minutes` (1–120) |
+| **Risposta** | `BookingSchema` |
+
+**Codici**: `200` · `401` · `403` · `404` · `409` prenotazione non in attesa, o camere nel frattempo vendute
+
+**Logica.** Concede più tempo a un ospite che sta completando la prenotazione. Solo su prenotazioni in stato `PENDING_*`.
+
+Se nel frattempo le camere sono state vendute a qualcun altro la proroga viene respinta: il blocco non si può riattivare su uno slot ormai occupato, e l'exclusion constraint lo impedisce.
+
+**Test**: `TestOperations::test_proroga_hold_su_prenotazione_confermata_rifiutata`, `test_proroga_hold_su_prenotazione_in_attesa`.
 
 ---
 
@@ -567,6 +758,7 @@ Lo snapshot anagrafico resta comunque congelato: una modifica successiva all'acc
 | Schema | Campi principali |
 |:--|:--|
 | `AdminBookingCreateSchema` | date, `guest_count`, `room_ids`, `payment_option`, `payment_method?`, **`user_id` XOR `guest`**, `skip_email_confirmation` (default `true`), `mark_as_paid` (default `false`), `admin_notes?` — consente date nel passato |
+| `AdminBookingUpdateSchema` | **`version`** (obbligatorio), date, `guest_count`, `room_ids`, `guest?`, `admin_notes?`, `reason?` — consente date nel passato; l'opzione di pagamento **non** è modificabile |
 | `BookingStatusUpdateSchema` | `new_status`, `reason?` — **obbligatoria** se `new_status = CANCELLED` |
 | `AdminPaymentRegistrationSchema` | `payment_method`, `payment_status`, `amount?` |
 | `BookingExtendHoldSchema` | `minutes` (1–120) |
@@ -639,11 +831,25 @@ Lo snapshot anagrafico resta comunque congelato: una modifica successiva all'acc
 | `booking` | `BookingPublicSchema` | — |
 | `confirmation_token` | string \| null | **solo se `EMAIL_ENABLED=false`** — vedi §3.6 |
 
-#### `BookingSchema` — vista amministrativa *(Step E)*
+#### `BookingSchema` — vista amministrativa
 
-Tutti i campi di `BookingPublicSchema`, più: `id`, `source_channel`, `user_id`, `guest_phone`, `payment_method`, `cancelled_at`, `cancellation_reason`, `admin_notes`, `created_at`, `updated_at`, `created_by`, `last_updated_by`, `status_history[]`.
+Tutti i campi di `BookingPublicSchema`, più: `id`, `source_channel`, `user_id`, `guest_phone`, `payment_method`, `cancelled_at`, `cancellation_reason`, `admin_notes`, `created_at`, `updated_at`, `created_by`, `last_updated_by`, **`version`**, `status_history[]`.
 
-#### `BookingListItemSchema` e `PaginatedBookingsSchema` *(Step E)*
+> **`version` è il contatore dell'optimistic locking.** Il frontend lo legge con la `GET` e lo rimanda invariato nella `PATCH`. Se nel frattempo un altro operatore ha salvato, la risposta è `409` e la sua modifica non viene sovrascritta. Volutamente assente da `BookingPublicSchema`: all'ospite non serve.
+
+#### `AdminBookingCreatedSchema`
+
+`booking` (`BookingSchema`) · `confirmation_token` (string | null).
+
+Porta la vista completa, non quella pubblica: l'admin deve vedere audit, canale di origine e note interne. Il token è `null` quando `skip_email_confirmation` è attivo.
+
+#### `BookingStatusHistorySchema`
+
+`from_status?` · `to_status` · `actor_type` · `reason?` · `created_at`.
+
+> Lo storico registra **anche le modifiche che non cambiano stato**: una `PATCH` produce una riga con `from_status == to_status` e una descrizione di cosa è cambiato. "Chi ha spostato le date" è esattamente l'informazione che serve in caso di contestazione.
+
+#### `BookingListItemSchema` e `PaginatedBookingsSchema`
 
 Riga di elenco: `id`, `code`, `status`, `check_in`, `check_out`, `guest_lastname`, `guest_email`, `rooms_count`, `total_price`, `payment_status`.
 Contenitore: `items[]`, `total`, `page`, `page_size`, `pages`.
@@ -697,12 +903,13 @@ Ogni transizione non prevista produce `409`. Ogni transizione eseguita lascia un
 
 | File | Test | Database | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_booking_schema.py` | 38 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice |
-| `test_pricing_service.py` | 18 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
+| `test_booking_schema.py` | 39 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice |
+| `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
-| `test_booking_service.py` | 23 | sì | **Concorrenza (×10)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
-| `test_booking_api.py` | 15 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione |
-| **Totale** | **105** | | |
+| `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
+| `test_booking_api.py` | 18 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza** |
+| `test_admin_booking_api.py` | 32 | sì | Autorizzazione, creazione on-behalf-of, modifica con optimistic locking, stato, incassi |
+| **Totale eseguito** | **~140** | | il test di concorrenza è parametrizzato su 10 iterazioni |
 
 ### Il test che conta più di tutti
 
@@ -742,7 +949,24 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 ### Autorizzazione
 - [ ] `GET /me` senza cookie → `401`
 - [ ] `GET /me` con cookie valido → le proprie prenotazioni
+- [ ] `POST /me` come utente autenticato → la prenotazione compare in `GET /me`
+- [ ] Cancellare la propria prenotazione col codice → `CANCELLED`
 - [ ] Cancellare la prenotazione di un altro utente → `404`
+
+### Area amministrativa
+- [ ] `GET /admin/bookings/` senza cookie → `401`; con utente normale → `403`
+- [ ] Creazione per conto di terzi con ospite manuale → nasce `CONFIRMED`, nessun token
+- [ ] Creazione con `user_id` → anagrafica presa dal profilo
+- [ ] Creazione con `user_id` **e** `guest` insieme → `422`
+- [ ] `PATCH` che sposta le date → prezzo ricalcolato, righe camera riallineate
+- [ ] `PATCH` con `version` obsoleto → `409` "modificata da un altro operatore"
+- [ ] `PATCH` verso uno slot occupato → `409`
+- [ ] `PATCH` su prenotazione annullata → `409`
+- [ ] Check-in registrato prima della data di arrivo → `409`
+- [ ] Annullamento senza motivazione → `422`
+- [ ] Annullamento → lo slot torna immediatamente prenotabile
+- [ ] Registrazione incasso in contanti → `payment_status: PAID`
+- [ ] Proroga hold su prenotazione confermata → `409`
 
 ### Integrità dei dati
 - [ ] Modificare il prezzo di una camera dopo una prenotazione → il totale storico resta invariato
@@ -755,10 +979,44 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 
 ---
 
+## 8bis. Due trappole da conoscere
+
+Emerse durante lo sviluppo, e rilevanti per chi lavora su questo codice.
+
+### 11.1 Un errore di validazione può essere colpa del server
+
+L'handler globale è registrato sulla `ValidationError` di Pydantic, che viene
+sollevata sia quando il **client** manda dati sbagliati, sia quando è il
+**server** a costruire male un modello di risposta. Entrambi i casi producono
+oggi un `422` con un messaggio del tipo *"Il campo X è obbligatorio"*.
+
+Se ricevi un `422` che nomina un campo che non hai inviato — e che non
+appartiene alla richiesta — non stai sbagliando tu: è un bug del backend nella
+costruzione della risposta. *(Correzione in coda al debito tecnico: gli errori
+di costruzione lato server dovranno diventare `500`.)*
+
+### 11.2 Un `201` non dimostra che il dato sia stato salvato
+
+SQLAlchemy 2.0 apre una transazione alla **prima query, anche di sola
+lettura**. La dipendenza di autenticazione legge la tabella utenti prima di
+entrare nell'endpoint, quindi su ogni rotta protetta la sessione risulta già
+"in transazione".
+
+Il Service concludeva perciò che il commit spettasse a qualcun altro, e la
+scrittura non veniva mai persistita: risposta `201` con il corpo corretto,
+database vuoto. Corretto allo Step E chiudendo la transazione esplicitamente.
+
+**Conseguenza per i test**: verificare una scrittura rileggendo il corpo della
+risposta non prova nulla. Serve una **richiesta successiva**, che usa una
+sessione diversa.
+
+---
+
 ## 9. Changelog
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 20/09/2026 | **E** | 7 endpoint amministrativi · **`POST /me/{code}/cancel` ora usa il codice invece dell'`id` interno** (era inutilizzabile dal client) · modifica di date e camere con ricalcolo prezzo · optimistic locking esposto al client (`version`) · `ConcurrentModification` · storico esteso alle modifiche non di stato |
 | 20/09/2026 | **D** | 9 endpoint pubblici e utente · rate limiting · captcha Turnstile · honeypot · `Retry-After` · `BookingCreatedSchema` · `trusted_proxy_count` |
 | 20/09/2026 | **C** | Preventivo firmato · token monouso · motore di prenotazione con locking a 3 livelli · disponibilità con combinazioni |
 | 19/09/2026 | **B** | 21 DTO · 3 repository · `AppException` con handler unico · correzione 500→422 sulle validazioni · `EntityInUse` |
@@ -770,8 +1028,7 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 
 | Step | Contenuto | Impatto su questo documento |
 |:--|:--|:--|
-| **E** | API amministrative | 8 nuovi endpoint sotto `/api/v1/admin/bookings` |
-| **F** | Email e sweeper | `confirmation_token` sparisce dalle risposte; transizione automatica a `EXPIRED` |
+| **F** | Email e sweeper | `confirmation_token` sparisce dalle risposte; transizione automatica a `EXPIRED`; endpoint manuale `POST /admin/bookings/sweep-expired` |
 | **G** | Pagamenti Stripe | Endpoint webhook e creazione Payment Intent; codici `402` |
 
 ---
