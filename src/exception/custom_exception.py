@@ -190,3 +190,47 @@ class PaymentRequired(AppException):
 class PaymentFailed(AppException):
     status_code = 402
     default_message = "Il pagamento non è andato a buon fine"
+
+
+# ===========================================================================
+# Pagamenti — integrazione con il gestore esterno (Step G)
+# ===========================================================================
+
+class PaymentGatewayError(AppException):
+    """
+    Il gestore dei pagamenti non è raggiungibile o ha risposto in modo
+    inatteso.
+
+    `502` e non `500`: il guasto è a monte, in un servizio di terze parti, e
+    la distinzione conta quando si legge un grafico di errori alle tre di
+    notte. Il messaggio esposto al client resta generico — quello di Stripe
+    può contenere dettagli di configurazione.
+    """
+    status_code = 502
+    default_message = "Servizio di pagamento momentaneamente non disponibile"
+
+
+class PaymentIntentNotCancellable(AppException):
+    """
+    Stripe rifiuta di rilasciare l'autorizzazione perché l'importo risulta già
+    incassato.
+
+    Non è un guasto: è un **esito**, e va letto come "il pagamento è andato a
+    buon fine mentre stavamo per annullarlo". Chi la intercetta deve
+    riconsiderare la prenotazione come pagata, non riprovare.
+    """
+    status_code = 409
+    default_message = "Il pagamento risulta già incassato"
+
+
+class InvalidWebhookSignature(AppException):
+    """
+    La firma della notifica non corrisponde.
+
+    È l'unica autenticazione di quell'endpoint: chiunque conosca l'URL può
+    chiamarlo, solo Stripe sa firmarlo. Il messaggio è volutamente avaro — a
+    chi sta tentando di falsificare una notifica non si spiega perché non ha
+    funzionato.
+    """
+    status_code = 400
+    default_message = "Firma non valida"

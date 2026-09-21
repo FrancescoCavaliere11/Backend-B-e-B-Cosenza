@@ -59,8 +59,20 @@ class Settings(BaseSettings):
     quote_token_expire_minutes: int = 15
 
     # --- Booking: locking e regole di soggiorno ------------------------------
-    #: Durata del blocco temporaneo dello slot in attesa di conferma/pagamento.
+    #: Durata del blocco temporaneo dello slot in attesa di conferma.
     booking_hold_minutes: int = 15
+    #: Durata del blocco quando è in corso un pagamento online.
+    #:
+    #: Più lunga di `booking_hold_minutes` perché misura una cosa diversa:
+    #: quindici minuti bastano per un clic su un link, non per un pagamento —
+    #: autenticazione della banca, carta rifiutata e ritentata, ospite che si
+    #: allontana dal computer.
+    #:
+    #: Allungarla non apre falle: ciò che tiene davvero lo slot non è questo
+    #: timer ma l'autorizzazione viva su Stripe, e lo sweeper non libera nulla
+    #: prima di averla annullata. Questo valore è il tetto agli abbandoni, non
+    #: una finestra di rischio.
+    booking_payment_hold_minutes: int = 30
     #: Ore prima del check-in entro cui la cancellazione PAY_ON_ARRIVAL è gratuita.
     booking_free_cancellation_hours: int = 48
     booking_min_nights: int = 1
@@ -145,6 +157,19 @@ class Settings(BaseSettings):
     stripe_enabled: bool = False
     stripe_secret_key: Optional[SecretStr] = None
     stripe_webhook_secret: Optional[SecretStr] = None
+
+    #: Rimborso automatico quando si annulla una prenotazione già incassata.
+    #:
+    #: Non riguarda il caso "slot perduto durante il pagamento", che non
+    #: produce mai un addebito: l'autorizzazione viene rilasciata prima di
+    #: incassare. Riguarda gli annullamenti successivi alla conferma, dove i
+    #: soldi sono davvero nostri e restituirli è una decisione commerciale.
+    stripe_auto_refund_on_cancellation: bool = False
+
+    #: Tolleranza sull'età della firma del webhook, in secondi. Oltre questa
+    #: soglia una notifica viene respinta anche se firmata correttamente: è la
+    #: difesa contro il riuso di una notifica catturata in passato.
+    stripe_webhook_tolerance_seconds: int = 300
 
     model_config = SettingsConfigDict(env_file=env_file_path, extra="ignore")
 

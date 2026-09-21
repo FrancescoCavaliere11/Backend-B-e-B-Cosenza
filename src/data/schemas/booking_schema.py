@@ -666,3 +666,63 @@ class SweepResultSchema(CustomModel):
     expired_count: int = Field(description="Prenotazioni portate a EXPIRED")
     notified_count: int = Field(description="Ospiti avvisati via email")
     swept_at: datetime = Field(description="Istante di esecuzione, in UTC")
+
+
+# ===========================================================================
+# Pagamenti
+# ===========================================================================
+
+class PaymentIntentRequestSchema(CustomModel):
+    """
+    Richiesta di avvio del pagamento.
+
+    Richiede codice **e** email, come il lookup: il solo codice non deve
+    bastare ad aprire un pagamento su una prenotazione altrui.
+    """
+
+    code: str = Field(max_length=20, description="Codice prenotazione")
+    email: EmailStr = Field(description="Email indicata nella prenotazione")
+
+    @field_validator("code")
+    @classmethod
+    def normalizza_codice(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class PaymentIntentSchema(CustomModel):
+    """
+    Ciò che serve al browser per completare il pagamento.
+
+    `client_secret` consente di pagare **quella** prenotazione e nient'altro:
+    non è una chiave segreta e va trasmesso al browser, ma non ha ragione di
+    comparire nei log.
+
+    `amount` viaggia per essere mostrato all'ospite. Non è un dato che il
+    client possa modificare per cambiare l'addebito: l'importo vero è quello
+    che il server ha comunicato a Stripe, e viene comunque riverificato prima
+    dell'incasso.
+    """
+
+    client_secret: Optional[str] = Field(description="Segreto del Payment Intent")
+    amount: Decimal = Field(description="Totale da pagare")
+    currency: str
+    booking_code: str
+
+
+class WebhookResultSchema(CustomModel):
+    """
+    Esito dell'elaborazione di una notifica.
+
+    Torna a Stripe, che guarda solo il codice di stato, ma è preziosa nei log
+    e nei test: dice *quale ramo* è stato percorso, non solo che è andato bene.
+    """
+
+    event_id: str
+    event_type: str
+    outcome: str = Field(
+        description=(
+            "CONFIRMED · ALREADY_CONFIRMED · SLOT_LOST · AMOUNT_MISMATCH · "
+            "PAYMENT_FAILED · REFUNDED · CANCELED · DUPLICATE · IGNORED · "
+            "UNKNOWN_BOOKING"
+        )
+    )

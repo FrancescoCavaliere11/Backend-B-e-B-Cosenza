@@ -1,0 +1,28 @@
+Ciao {{ booking.guest_firstname }},
+
+ci dispiace davvero: mentre completavi il pagamento, le camere che avevi
+scelto sono state prenotate da un altro ospite. Non siamo riusciti a
+confermare il tuo soggiorno.
+
+NON TI ABBIAMO ADDEBITATO NULLA. L'importo era solo bloccato sulla carta e il
+blocco è stato rilasciato: a seconda della tua banca può restare visibile come
+"in sospeso" per qualche giorno, poi sparisce da solo.
+
+Se le date ti servono ancora, vale la pena controllare: potrebbero esserci
+altre camere libere per lo stesso periodo.
+
+Cerca di nuovo:
+{{ booking_url }}
+
+--- RICHIESTA NON ANDATA A BUON FINE ---
+Codice prenotazione: {{ booking.code }}
+Arrivo:    {{ booking.check_in | data }}
+Partenza:  {{ booking.check_out | data }}
+Notti:     {{ booking.nights }}
+Ospiti:    {{ booking.guest_count }}
+{% for item in booking.rooms %}
+Camera:    {{ item.room_name }} (n. {{ item.room_number }})
+{% endfor %}
+Totale:    {{ booking.total_price | importo }} {{ booking.currency }} (non addebitato)
+
+B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.

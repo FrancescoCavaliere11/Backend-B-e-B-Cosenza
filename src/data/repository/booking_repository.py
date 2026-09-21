@@ -106,10 +106,60 @@ class BookingRepository:
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
 
-    async def get_by_stripe_payment_intent(self, payment_intent_id: str) -> Optional[Booking]:
+    async def get_by_stripe_payment_intent(
+            self,
+            payment_intent_id: str,
+            with_items: bool = False,
+            for_update: bool = False
+    ) -> Optional[Booking]:
+        """
+        Prenotazione associata a un Payment Intent.
+
+        :param with_items: carica righe camera e camere. Serve a chi deve
+            toccare `is_active` o comporre l'email, cioè a tutto il percorso
+            del webhook.
+        :param for_update: blocca la riga. Le notifiche di Stripe possono
+            arrivare in parallelo fra loro e insieme allo sweeper, e tutte
+            vogliono decidere sullo stesso pagamento: senza lock, due percorsi
+            potrebbero concludere entrambi di poter incassare.
+        """
         query = select(Booking).where(Booking.stripe_payment_intent_id == payment_intent_id)
+
+        if with_items:
+            query = query.options(
+                selectinload(Booking.items).selectinload(BookingRoomItem.room)
+            )
+        if for_update:
+            query = query.with_for_update(of=Booking)
+
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
+
+    async def get_pending_payment_with_intent(self, limit: int = 100) -> List[Booking]:
+        """
+        Prenotazioni in attesa di pagamento, con blocco scaduto e un Payment
+        Intent ancora associato.
+
+        È il bacino su cui lo sweeper deve **annullare l'autorizzazione prima
+        di liberare lo slot**: rivendere la camera lasciando viva
+        un'autorizzazione significherebbe poter incassare per una stanza che
+        non abbiamo più.
+        """
+        now = datetime.now(timezone.utc)
+
+        query = (
+            select(Booking)
+            .where(
+                Booking.status == BookingStatus.PENDING_PAYMENT,
+                Booking.stripe_payment_intent_id.isnot(None),
+                Booking.hold_expires_at.isnot(None),
+                Booking.hold_expires_at <= now,
+            )
+            .order_by(Booking.hold_expires_at)
+            .limit(limit)
+        )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
     async def get_by_user(
             self,

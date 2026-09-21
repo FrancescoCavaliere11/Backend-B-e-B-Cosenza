@@ -13,6 +13,7 @@ from src.routers.room_service_router import room_service_router
 from src.routers.room_router import room_router
 from src.routers.booking_router import booking_router
 from src.routers.admin_booking_router import admin_booking_router
+from src.routers.payment_router import payment_router
 from src.exception.exception_handler import setup_exception_handler
 from src.service.booking_expiration_service import BookingExpirationService
 
@@ -54,7 +55,16 @@ async def lifespan(application: FastAPI):
     L'arresto attende la fine della passata in corso, così un riavvio non
     interrompe una transazione a metà.
     """
-    sweeper = BookingExpirationService(async_session_maker)
+    # Lo sweeper riceve il gateway: prima di liberare uno slot deve poter
+    # rilasciare l'eventuale autorizzazione ancora viva su Stripe. Senza
+    # gateway non tocca le prenotazioni che ne hanno una.
+    gateway = None
+    if settings.stripe_enabled:
+        from src.routers.payment_router import get_stripe_gateway
+
+        gateway = get_stripe_gateway()
+
+    sweeper = BookingExpirationService(async_session_maker, gateway=gateway)
 
     if settings.sweeper_enabled:
         sweeper.start()
@@ -84,3 +94,4 @@ app.include_router(room_router)
 app.include_router(extra_service_router)
 app.include_router(booking_router)
 app.include_router(admin_booking_router)
+app.include_router(payment_router)

@@ -210,6 +210,30 @@ def email_backend():
     reset_email_service()
 
 
+@pytest_asyncio.fixture
+async def stripe_gateway(api_client):
+    """
+    Sostituisce Stripe con un gateway in memoria.
+
+    Nessuna rete, nessuna chiave, nessun denaro. Riproduce la macchina a stati
+    che ci interessa — autorizzato, incassato, rilasciato — ed è l'unico modo
+    di provare un rilascio di autorizzazione o un rimborso senza spostare
+    denaro vero.
+
+    Dipende da `api_client` perché registra l'override sull'applicazione già
+    avviata; la pulizia avviene nel teardown di quella fixture, che azzera
+    tutti gli override.
+    """
+    from src.main import app
+    from src.routers.payment_router import get_stripe_gateway
+    from src.service.payment.gateway import FakeStripeGateway
+
+    gateway = FakeStripeGateway()
+    app.dependency_overrides[get_stripe_gateway] = lambda: gateway
+
+    return gateway
+
+
 #: Password usata dagli utenti di prova. Rispetta i validatori del progetto:
 #: maiuscola, minuscola, cifra e carattere speciale.
 TEST_PASSWORD = "Password1!"

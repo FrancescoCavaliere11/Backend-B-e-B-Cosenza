@@ -19,6 +19,8 @@ il flag viene scritto, e ogni transizione di stato ci passa.
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+from decimal import Decimal
+from enum import Enum
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 from uuid import UUID
 
@@ -74,6 +76,7 @@ from src.exception.custom_exception import (
     InvalidBookingToken,
     InvalidGuestCount,
     InvalidQuoteToken,
+    PaymentRequired,
     RateLimitExceeded,
     RoomNotAvailable,
 )
@@ -82,6 +85,7 @@ from src.security.booking_tokens import generate_booking_token, hash_booking_tok
 from src.security.quote_token import QuotePayload
 from src.security.validators import today_in_app_timezone
 from src.service.pricing_service import PricingService
+from src.service.transaction import run_in_transaction
 
 #: Transizioni ammesse dalla macchina a stati. Unica fonte di verità:
 #: qualunque cambio di stato passa da qui.
@@ -147,6 +151,53 @@ class BookingCreationResult:
     booking: Union[BookingPublicSchema, BookingSchema]
     confirmation_token: Optional[str] = None
     manage_token: Optional[str] = None
+
+
+class PaymentOutcome(str, Enum):
+    """
+    Esito della verifica che precede l'incasso.
+
+    Esiste perché incassare non è la conseguenza automatica
+    dell'autorizzazione: fra i due momenti il mondo può essere cambiato, e le
+    risposte possibili sono più di "sì" e "no".
+    """
+
+    #: La camera è ancora dell'ospite: si può incassare.
+    CAPTURE = "CAPTURE"
+    #: Già confermata da una consegna precedente della stessa notifica.
+    ALREADY_CONFIRMED = "ALREADY_CONFIRMED"
+    #: L'importo autorizzato non corrisponde al totale. Non si incassa.
+    AMOUNT_MISMATCH = "AMOUNT_MISMATCH"
+    #: Nessuna prenotazione risulta associata a quel Payment Intent.
+    UNKNOWN_BOOKING = "UNKNOWN_BOOKING"
+
+
+@dataclass
+class PaymentAuthorizationResult:
+    """Esito della verifica, con il codice prenotazione per log ed email."""
+
+    outcome: PaymentOutcome
+    booking_code: Optional[str] = None
+
+
+@dataclass
+class PaymentContext:
+    """Dati necessari a creare il Payment Intent, estratti dalla prenotazione."""
+
+    code: str
+    total_price: Decimal
+    currency: str
+    guest_email: str
+    existing_intent_id: Optional[str] = None
+
+
+@dataclass
+class PendingPaymentRef:
+    """Riferimento leggero a un'autorizzazione che lo sweeper deve annullare."""
+
+    booking_id: UUID
+    code: str
+    payment_intent_id: str
 
 
 @dataclass
@@ -1011,7 +1062,11 @@ class BookingService:
     # Scadenze                                                           #
     # ================================================================== #
 
-    async def expire_pending(self, limit: Optional[int] = None) -> List[ExpiredBookingNotice]:
+    async def expire_pending(
+            self,
+            limit: Optional[int] = None,
+            exclude_ids: Optional[Sequence[UUID]] = None
+    ) -> List[ExpiredBookingNotice]:
         """
         Porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto.
 
@@ -1029,14 +1084,24 @@ class BookingService:
         stati e l'avviso all'ospite, non la correttezza.
 
         :param limit: prenotazioni trattate in questa passata.
+        :param exclude_ids: prenotazioni da **non** toccare in questa passata.
+            Serve a un caso preciso: quando lo sweeper non è riuscito ad
+            annullare un'autorizzazione su Stripe — gestore irraggiungibile,
+            per esempio — quella prenotazione non va fatta scadere. Liberare
+            lo slot lasciando viva un'autorizzazione significherebbe poter
+            incassare per una camera già rivenduta, cioè esattamente il caso
+            che tutto questo disegno esiste per rendere impossibile.
         :return: un avviso per prenotazione, con l'indicazione se valga ancora
             la pena notificarla.
         """
-        return await self._in_transaction(lambda: self._execute_expire_pending(limit))
+        return await self._in_transaction(
+            lambda: self._execute_expire_pending(limit, exclude_ids)
+        )
 
     async def _execute_expire_pending(
             self,
-            limit: Optional[int]
+            limit: Optional[int],
+            exclude_ids: Optional[Sequence[UUID]] = None
     ) -> List[ExpiredBookingNotice]:
         bookings = await self.booking_repository.get_expired_pending(
             limit=limit or settings.sweeper_batch_size,
@@ -1050,8 +1115,12 @@ class BookingService:
             hours=settings.sweeper_notify_max_age_hours
         )
         notices: List[ExpiredBookingNotice] = []
+        esclusi = set(exclude_ids or ())
 
         for booking in bookings:
+            if booking.id in esclusi:
+                continue
+
             # Letto prima della transizione: è il dato che distingue una
             # scadenza appena avvenuta da una recuperata in ritardo.
             expired_at = booking.hold_expires_at
@@ -1082,6 +1151,316 @@ class BookingService:
 
         await self.booking_repository.flush()
         return notices
+
+    # ================================================================== #
+    # Pagamenti                                                          #
+    # ================================================================== #
+
+    async def start_payment(self, code: str, email: str) -> PaymentContext:
+        """
+        Prepara una prenotazione al pagamento e proroga il blocco.
+
+        Il blocco standard è tarato su un clic in un'email; un pagamento
+        richiede molto di più — autenticazione della banca, carta rifiutata e
+        ritentata, ospite che si allontana. La proroga a
+        `booking_payment_hold_minutes` riflette quel tempo reale.
+
+        Non crea nulla su Stripe: la chiamata di rete non deve stare dentro una
+        transazione del database. Un timeout farebbe rollback della
+        prenotazione, o peggio lascerebbe dietro un Payment Intent pagabile
+        senza nulla che gli corrisponda.
+        """
+        return await self._in_transaction(lambda: self._execute_start_payment(code, email))
+
+    async def _execute_start_payment(self, code: str, email: str) -> PaymentContext:
+        booking = await self.booking_repository.get_by_code_and_email(code, email)
+        if booking is None:
+            raise EntityNotFound("Prenotazione non trovata")
+
+        if booking.payment_option != PaymentOption.PAY_NOW:
+            raise PaymentRequired("Questa prenotazione si salda in struttura")
+
+        if booking.status == BookingStatus.CONFIRMED:
+            raise InvalidBookingStatusTransition("La prenotazione è già confermata")
+
+        if booking.status != BookingStatus.PENDING_PAYMENT:
+            raise BookingHoldExpired()
+
+        booking.hold_expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=settings.booking_payment_hold_minutes
+        )
+        # Riattiva le righe camera se erano state liberate: la proroga vale
+        # solo se lo slot è ancora disponibile, e a deciderlo è il vincolo del
+        # database, non un controllo applicativo.
+        self._sync_items_active_flag(booking)
+
+        try:
+            await self.booking_repository.flush()
+        except IntegrityError as error:
+            if self._is_overlap_violation(error):
+                raise RoomNotAvailable() from error
+            raise
+
+        return PaymentContext(
+            code=booking.code,
+            total_price=Decimal(booking.total_price),
+            currency=booking.currency,
+            guest_email=booking.guest_email,
+            existing_intent_id=booking.stripe_payment_intent_id,
+        )
+
+    async def attach_payment_intent(self, code: str, intent_id: str) -> None:
+        """Associa il Payment Intent alla prenotazione, dopo averlo creato."""
+        return await self._in_transaction(
+            lambda: self._execute_attach_intent(code, intent_id)
+        )
+
+    async def _execute_attach_intent(self, code: str, intent_id: str) -> None:
+        booking = await self.booking_repository.get_by_code(code)
+        if booking is None:
+            raise EntityNotFound("Prenotazione non trovata")
+
+        booking.stripe_payment_intent_id = intent_id
+        booking.payment_method = PaymentMethod.STRIPE_CARD
+        await self.booking_repository.flush()
+
+    async def authorize_payment(
+            self,
+            intent_id: str,
+            amount: Decimal,
+            currency: str
+    ) -> PaymentAuthorizationResult:
+        """
+        Verifica che si possa incassare. **È il controllo che rende impossibile
+        incassare per una camera che non abbiamo più.**
+
+        Stripe ha autorizzato l'importo ma non lo ha prelevato: siamo noi a
+        decidere se prelevarlo, e questo è il momento in cui decidiamo. Se lo
+        slot non è più nostro, l'autorizzazione viene rilasciata e l'ospite non
+        viene addebitato di nulla — molto meglio di un addebito seguito da un
+        rimborso.
+
+        La riga viene bloccata: notifiche di Stripe e sweeper possono arrivare
+        insieme sullo stesso pagamento, e senza lock potrebbero concludere
+        entrambi di poter agire.
+
+        :raises RoomNotAvailable: lo slot è stato venduto a qualcun altro. Il
+            chiamante deve rilasciare l'autorizzazione. È un'eccezione e non un
+            valore di ritorno perché il tentativo di riattivare le righe camera
+            fallisce a livello di database, e da lì la transazione va comunque
+            annullata.
+        """
+        return await self._in_transaction(
+            lambda: self._execute_authorize_payment(intent_id, amount, currency)
+        )
+
+    async def _execute_authorize_payment(
+            self,
+            intent_id: str,
+            amount: Decimal,
+            currency: str
+    ) -> PaymentAuthorizationResult:
+        booking = await self.booking_repository.get_by_stripe_payment_intent(
+            intent_id, with_items=True, for_update=True
+        )
+        if booking is None:
+            return PaymentAuthorizationResult(PaymentOutcome.UNKNOWN_BOOKING)
+
+        if booking.status == BookingStatus.CONFIRMED:
+            return PaymentAuthorizationResult(
+                PaymentOutcome.ALREADY_CONFIRMED, booking.code
+            )
+
+        # L'importo si verifica, non si accetta. Il Payment Intent lo abbiamo
+        # creato noi, ma fra creazione e autorizzazione il totale potrebbe
+        # essere stato modificato dal back-office.
+        importo_atteso = Decimal(booking.total_price).quantize(Decimal("0.01"))
+        if amount != importo_atteso or currency.upper() != booking.currency.upper():
+            return PaymentAuthorizationResult(
+                PaymentOutcome.AMOUNT_MISMATCH, booking.code
+            )
+
+        # Lo slot è ancora nostro? Non lo si chiede a una query: lo si prova a
+        # riprendere, e lascia rispondere l'exclusion constraint.
+        for item in booking.items:
+            item.is_active = True
+
+        try:
+            await self.booking_repository.flush()
+        except IntegrityError as error:
+            if self._is_overlap_violation(error):
+                raise RoomNotAvailable(
+                    "Le camere sono state prenotate da un altro ospite"
+                ) from error
+            raise
+
+        booking.payment_status = PaymentStatus.AUTHORIZED
+        await self.booking_repository.flush()
+
+        return PaymentAuthorizationResult(PaymentOutcome.CAPTURE, booking.code)
+
+    async def confirm_paid_booking(
+            self,
+            intent_id: str,
+            card_brand: Optional[str] = None,
+            card_last4: Optional[str] = None
+    ) -> Optional[BookingCreationResult]:
+        """
+        Porta a `CONFIRMED` una prenotazione il cui importo è stato incassato.
+
+        :return: `None` se la prenotazione era già confermata. Serve
+            all'idempotenza: Stripe consegna lo stesso evento più volte, e la
+            seconda non deve produrre né una transizione né una seconda email.
+        """
+        return await self._in_transaction(
+            lambda: self._execute_confirm_paid(intent_id, card_brand, card_last4)
+        )
+
+    async def _execute_confirm_paid(
+            self,
+            intent_id: str,
+            card_brand: Optional[str],
+            card_last4: Optional[str]
+    ) -> Optional[BookingCreationResult]:
+        booking = await self.booking_repository.get_by_stripe_payment_intent(
+            intent_id, with_items=True, for_update=True
+        )
+        if booking is None or booking.status == BookingStatus.CONFIRMED:
+            return None
+
+        now = datetime.now(timezone.utc)
+
+        self._apply_transition(
+            booking,
+            BookingStatus.CONFIRMED,
+            AuditActorType.SYSTEM,
+            reason="Pagamento online incassato",
+        )
+
+        booking.payment_status = PaymentStatus.PAID
+        booking.card_brand = card_brand
+        booking.card_last4 = card_last4
+        booking.confirmed_at = now
+        booking.hold_expires_at = None
+        booking.cancellation_deadline = self.pricing_service.compute_cancellation_deadline(
+            booking.check_in, booking.payment_option
+        )
+        booking.last_updated_by = _SYSTEM_AUDIT_MARKER
+
+        # Rifatto dopo aver azzerato l'hold: la prenotazione non è più
+        # temporanea e lo slot resta occupato in modo definitivo.
+        self._sync_items_active_flag(booking)
+
+        manage_token = self._issue_manage_token(booking)
+        await self.booking_repository.flush()
+
+        return BookingCreationResult(
+            booking=self._to_public_schema(booking),
+            manage_token=manage_token,
+        )
+
+    async def mark_payment_failed(self, intent_id: str) -> Optional[BookingPublicSchema]:
+        """
+        Registra un pagamento rifiutato **lasciando la prenotazione
+        ritentabile**.
+
+        Lo stato resta `PENDING_PAYMENT` finché il blocco non scade: una carta
+        rifiutata è quasi sempre un problema di quella carta, e annullare
+        subito costringerebbe l'ospite a rifare tutto da capo per un motivo che
+        si risolve cambiando tessera.
+        """
+        return await self._in_transaction(
+            lambda: self._execute_mark_payment(intent_id, PaymentStatus.FAILED)
+        )
+
+    async def mark_payment_refunded(self, intent_id: str) -> Optional[BookingPublicSchema]:
+        """Registra un rimborso emesso su Stripe."""
+        return await self._in_transaction(
+            lambda: self._execute_mark_payment(intent_id, PaymentStatus.REFUNDED)
+        )
+
+    async def _execute_mark_payment(
+            self,
+            intent_id: str,
+            status: PaymentStatus
+    ) -> Optional[BookingPublicSchema]:
+        booking = await self.booking_repository.get_by_stripe_payment_intent(
+            intent_id, with_items=True, for_update=True
+        )
+        if booking is None:
+            return None
+
+        booking.payment_status = status
+        booking.last_updated_by = _SYSTEM_AUDIT_MARKER
+        await self.booking_repository.flush()
+
+        return self._to_public_schema(booking)
+
+    async def abandon_for_slot_lost(self, intent_id: str) -> Optional[BookingPublicSchema]:
+        """
+        Chiude una prenotazione il cui slot è stato venduto ad altri mentre il
+        pagamento era in corso.
+
+        Da invocare **solo dopo** aver rilasciato l'autorizzazione: l'ospite non
+        deve essere addebitato, e la sequenza corretta è prima rendere
+        impossibile l'incasso, poi chiudere la prenotazione.
+
+        Stato `CANCELLED` e non `EXPIRED`: non è scaduto nulla, è una corsa
+        persa, e lo storico deve dirlo con la sua motivazione.
+        """
+        return await self._in_transaction(
+            lambda: self._execute_abandon_slot_lost(intent_id)
+        )
+
+    async def _execute_abandon_slot_lost(
+            self,
+            intent_id: str
+    ) -> Optional[BookingPublicSchema]:
+        booking = await self.booking_repository.get_by_stripe_payment_intent(
+            intent_id, with_items=True, for_update=True
+        )
+        if booking is None or booking.status.is_terminal:
+            return None
+
+        motivo = "Camere non più disponibili al momento del pagamento"
+
+        self._apply_transition(
+            booking,
+            BookingStatus.CANCELLED,
+            AuditActorType.SYSTEM,
+            reason=motivo,
+        )
+        booking.cancelled_at = datetime.now(timezone.utc)
+        booking.cancellation_reason = motivo
+        booking.payment_status = PaymentStatus.NOT_REQUIRED
+        booking.last_updated_by = _SYSTEM_AUDIT_MARKER
+
+        await self.token_repository.invalidate_all_for_booking(booking.id)
+        await self.booking_repository.flush()
+
+        return self._to_public_schema(booking)
+
+    async def list_pending_payment_with_intent(
+            self,
+            limit: Optional[int] = None
+    ) -> List[PendingPaymentRef]:
+        """
+        Prenotazioni scadute con un'autorizzazione ancora viva.
+
+        Sola lettura: serve allo sweeper per sapere **quali autorizzazioni
+        annullare prima di liberare gli slot**.
+        """
+        bookings = await self.booking_repository.get_pending_payment_with_intent(
+            limit or settings.sweeper_batch_size
+        )
+        return [
+            PendingPaymentRef(
+                booking_id=booking.id,
+                code=booking.code,
+                payment_intent_id=booking.stripe_payment_intent_id,
+            )
+            for booking in bookings
+        ]
 
     async def get_admin_booking(self, booking_id: UUID) -> BookingSchema:
         """Dettaglio completo con timeline degli stati, per il back-office."""
@@ -1259,29 +1638,15 @@ class BookingService:
 
     async def _in_transaction(self, operation):
         """
-        Esegue l'operazione come unità atomica: commit in caso di successo,
-        rollback a fronte di qualunque eccezione.
+        Esegue l'operazione come unità atomica.
 
-        ⚠️ **Non si usa `session.in_transaction()` per decidere se aprire una
-        transazione.** SQLAlchemy 2.0 ha l'autobegin: una transazione si apre
-        da sola alla **prima query**, anche di sola lettura. La dipendenza di
-        autenticazione interroga la tabella utenti prima ancora di entrare
-        nell'endpoint, quindi su ogni rotta protetta la sessione risulta già
-        "in transazione". Il pattern `if in_transaction(): ... else: begin()`
-        concludeva perciò che il commit spettasse a qualcun altro — e la
-        scrittura non veniva mai persistita. Silenziosamente: la risposta HTTP
-        era `201`, ma a database non restava nulla.
-
-        Qui la transazione viene chiusa esplicitamente, senza ipotesi su chi
-        l'abbia aperta.
+        Delega a `run_in_transaction`, condivisa con il `PaymentService`: la
+        logica è identica e una sua divergenza non produrrebbe un errore ma
+        una scrittura persa in silenzio. Il perché di quella implementazione —
+        e dell'autobegin di SQLAlchemy 2.0 che l'ha resa necessaria — è
+        documentato lì.
         """
-        try:
-            result = await operation()
-            await self.session.commit()
-            return result
-        except Exception:
-            await self.session.rollback()
-            raise
+        return await run_in_transaction(self.session, operation)
 
     async def _secure_slots(
             self,

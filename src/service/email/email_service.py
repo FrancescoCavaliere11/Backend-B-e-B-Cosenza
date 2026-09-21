@@ -188,6 +188,23 @@ class EmailService:
             context={"booking_url": self._build_link(BOOKING_PATH)},
         )
 
+    async def send_booking_slot_lost(self, booking: BookingView) -> None:
+        """
+        Le camere sono state vendute ad altri durante il pagamento.
+
+        Merita un messaggio suo e non l'annullamento generico, per una ragione
+        sola: deve dire con chiarezza che **non c'è stato alcun addebito**.
+        Riusare il template di annullamento — che per il pagamento online
+        parla di "importo già pagato" — spaventerebbe l'ospite per un prelievo
+        che non è mai avvenuto.
+        """
+        await self._send(
+            template="booking_slot_lost",
+            subject=f"Prenotazione {booking.code} non confermata",
+            booking=booking,
+            context={"booking_url": self._build_link(BOOKING_PATH)},
+        )
+
     async def send_booking_expired(self, booking: BookingView) -> None:
         """Blocco scaduto senza conferma: le camere sono tornate disponibili."""
         await self._send(

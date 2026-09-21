@@ -1,7 +1,9 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → F
+Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → G
+
+> I pagamenti online hanno un documento proprio: `payment_api.md`.
 
 ---
 
@@ -270,7 +272,9 @@ Quattro messaggi, ciascuno in versione HTML e testo semplice.
 
 **Con `EMAIL_ENABLED=false`** i messaggi vengono scritti nei log invece che spediti, link compreso. Perché siano visibili serve che i log applicativi abbiano una destinazione: `configure_logging()` in `main.py` attacca un handler al sottoalbero `src`. Senza, uvicorn configura solo i propri logger e ogni riga del progetto viene scartata in silenzio — il canale console sembrerebbe non funzionare. È l'unico punto del sistema in cui un token in chiaro finisce in un log, ed è attivo esattamente quando le email sono spente, cioè in sviluppo.
 
-**Nessuna email su `PENDING_PAYMENT`.** Una prenotazione `PAY_NOW` nasce in attesa di incasso: l'ospite è ancora sulla pagina di pagamento e non c'è nulla da comunicargli. La notifica parte quando il webhook Stripe conferma (Step G).
+**Nessuna email su `PENDING_PAYMENT`.** Una prenotazione `PAY_NOW` nasce in attesa di incasso: l'ospite è ancora sulla pagina di pagamento e non c'è nulla da comunicargli. La notifica parte quando il webhook Stripe accerta l'incasso.
+
+**Un quinto template**, `booking_slot_lost`, è arrivato con lo Step G: le camere vendute ad altri durante il pagamento. Merita un messaggio suo perché deve dire con chiarezza che **non c'è stato alcun addebito** — l'annullamento generico, che per il pagamento online parla di "importo già pagato", spaventerebbe l'ospite per un prelievo mai avvenuto.
 
 ---
 
@@ -281,6 +285,8 @@ Porta a `EXPIRED` le prenotazioni temporanee il cui blocco e scaduto. Parte con 
 **È l'unico proprietario della transizione a `EXPIRED`.** In nessun altro punto del codice una prenotazione diventa `EXPIRED`.
 
 **Il sistema resta corretto anche se non gira.** Gli slot tornano prenotabili per altre due vie: le query di disponibilità scartano i pending con blocco scaduto, e la *just-in-time expiration* disattiva le righe camera durante la creazione successiva sulle stesse date. Senza sweeper mancano la pulizia degli stati e l'avviso all'ospite, non la correttezza.
+
+**Le autorizzazioni si rilasciano prima di liberare.** Da quando esistono i pagamenti, una prenotazione in attesa può avere un'autorizzazione viva su Stripe: lo sweeper la annulla **prima** di rimettere in vendita lo slot, e se non ci riesce non libera nulla. Dettagli in `payment_api.md` §6.
 
 **Con più worker uvicorn** ne parte uno per processo. Le passate si dividono il lavoro grazie a `FOR UPDATE ... SKIP LOCKED`: chi arriva secondo salta le righe già prese in carico invece di aspettarle.
 
@@ -424,7 +430,7 @@ curl -i -X POST http://localhost:8000/api/v1/bookings/quote \
 
 Lo slot resta bloccato **15 minuti** (`hold_expires_at`). Scaduto quel termine senza conferma, torna prenotabile e lo sweeper porta la prenotazione a `EXPIRED`.
 
-**Email**: `booking_pending` con `PAY_ON_ARRIVAL`. Con `PAY_NOW` **nessuna email**: l'ospite è ancora sulla pagina di pagamento e la notifica parte dal webhook Stripe (Step G).
+**Email**: `booking_pending` con `PAY_ON_ARRIVAL`. Con `PAY_NOW` **nessuna email**: l'ospite è ancora sulla pagina di pagamento, e la conferma parte quando il webhook Stripe accerta l'incasso — vedi `payment_api.md`.
 
 **Test**: `test_flusso_completo_...`, `test_slot_occupato_risponde_409`, `test_la_creazione_manda_una_sola_email_di_conferma`, `test_il_pagamento_online_non_manda_ancora_nulla`, `test_un_canale_email_guasto_non_impedisce_la_prenotazione`, `test_honeypot_compilato_rifiutato`, `test_condizioni_non_accettate_rifiutate`, `test_token_di_conferma_non_esposto_con_email_attiva`, più i 14 test di `test_booking_service.py` fra cui **`test_due_prenotazioni_concorrenti_una_sola_vince`**, ripetuto 10 volte.
 
@@ -1172,6 +1178,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 20/09/2026 | **G** | Pagamenti Stripe a incasso differito (documento a parte: `payment_api.md`) · quinto template email `booking_slot_lost` · lo sweeper rilascia le autorizzazioni prima di liberare gli slot |
 | 20/09/2026 | **F** | `configure_logging()`: i log applicativi avevano un logger ma nessun handler, quindi venivano scartati in silenzio · servizio email con 4 template HTML+testo · sweeper delle scadenze in `lifespan` · `POST /admin/bookings/sweep-expired` · **token `MANAGE` finalmente emesso: `POST /cancel` era irraggiungibile** · invio post-commit con `BackgroundTasks` · `FOR UPDATE SKIP LOCKED` sullo sweeper · nessuna email su `PENDING_PAYMENT` |
 | 20/09/2026 | **E** | 7 endpoint amministrativi · **`POST /me/{code}/cancel` ora usa il codice invece dell'`id` interno** (era inutilizzabile dal client) · modifica di date e camere con ricalcolo prezzo · optimistic locking esposto al client (`version`) · `ConcurrentModification` · storico esteso alle modifiche non di stato |
 | 20/09/2026 | **D** | 9 endpoint pubblici e utente · rate limiting · captcha Turnstile · honeypot · `Retry-After` · `BookingCreatedSchema` · `trusted_proxy_count` |
