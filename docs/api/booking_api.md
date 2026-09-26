@@ -231,6 +231,17 @@ Generati con `secrets.token_urlsafe(32)` — 256 bit di entropia. Nel database f
 
 Sono **monouso**: al primo utilizzo `used_at` viene valorizzato e i tentativi successivi respinti.
 
+**Validità.**
+
+| Scopo | Scade | Perché |
+|:--|:--|:--|
+| `CONFIRM_EMAIL` | Insieme al blocco dello slot (`hold_expires_at`) | Confermare dopo che le date sono tornate disponibili non avrebbe senso |
+| `MANAGE` | Alla **mezzanotte del check-in**, con tetto `MANAGE_TOKEN_MAX_DAYS` (400 gg) | Dal check-in in poi non consente più nulla: la cancellazione richiede lo stato `CONFIRMED`, e registrato l'arrivo la prenotazione è `CHECKED_IN` |
+
+Il tetto entra in gioco solo per soggiorni prenotati con grandissimo anticipo: un link valido per anni è un link che prima o poi finisce altrove.
+
+**Ritenzione.** Una riga scaduta resta in tabella per `TOKEN_RETENTION_DAYS` (30 giorni), poi viene eliminata dallo sweeper. Non è sicurezza — un token scaduto non è già più spendibile, la scadenza viene verificata a ogni uso — ma è la sola informazione che quella riga conserva: *se* e *quando* un token era stato emesso, che è ciò che serve a rispondere all'ospite che scrive "il link non mi è mai arrivato". In tabella c'è l'hash, non il valore, quindi nessuno può rimandargli lo stesso link.
+
 > ⚠️ **Il token viaggia nel body, mai in query string.** Un token nell'URL finisce negli access log, nell'header `Referer` e nella cronologia del browser. Il link nell'email punta al **frontend** (`{frontend_base_url}/booking/confirm?token=...`), e la SPA lo inoltra al backend con una `POST`.
 
 ### 3.6 Esposizione temporanea del token in sviluppo
@@ -280,7 +291,11 @@ Quattro messaggi, ciascuno in versione HTML e testo semplice.
 
 ### 3.9 Sweeper delle scadenze
 
-Porta a `EXPIRED` le prenotazioni temporanee il cui blocco e scaduto. Parte con l'applicazione (`lifespan`) e gira ogni `SWEEPER_INTERVAL_SECONDS` su lotti di `SWEEPER_BATCH_SIZE`.
+Porta a `EXPIRED` le prenotazioni temporanee il cui blocco è scaduto. Parte con l'applicazione (`lifespan`) e gira ogni `SWEEPER_INTERVAL_SECONDS` (**300**, cinque minuti) su lotti di `SWEEPER_BATCH_SIZE`.
+
+**Perché cinque minuti e non uno, e perché non un'ora.** La query costa poco, ma ogni passata interroga Stripe per ogni autorizzazione ancora viva: a sessanta secondi lo farebbe sessanta volte l'ora senza che nulla sia cambiato. Non si allunga oltre perché un pagamento abbandonato lascia su Stripe un intent **ancora pagabile** — finché non lo annulliamo, l'ospite che ritrova la scheda aperta può completarlo su una prenotazione che noi consideriamo persa. Questo intervallo è la durata di quella finestra.
+
+**Pulizia dei token.** Lo stesso ciclo elimina i token scaduti da più di `TOKEN_RETENTION_DAYS`, ma con cadenza propria: una volta ogni `TOKEN_PURGE_INTERVAL_HOURS` (24), a lotti di `TOKEN_PURGE_BATCH_SIZE` (1000). È manutenzione, non correttezza — farla a ogni passata sarebbe una `DELETE` ogni cinque minuti per liberare quasi sempre zero righe. Un suo fallimento viene registrato e non interrompe la passata: liberare gli slot non deve dipendere dalla pulizia di una tabella.
 
 **È l'unico proprietario della transizione a `EXPIRED`.** In nessun altro punto del codice una prenotazione diventa `EXPIRED`.
 
@@ -319,7 +334,7 @@ Porta a `EXPIRED` le prenotazioni temporanee il cui blocco e scaduto. Parte con 
 | 10 | `GET` | `/` | Elenco filtrato e paginato |
 | 11 | `GET` | `/{booking_id}` | Dettaglio completo con timeline |
 | 12 | `POST` | `/` | Creazione per conto di terzi |
-| 13 | `PATCH` | `/{booking_id}` | Modifica date, camere, ospiti, note |
+| ~~13~~ | ~~`PATCH`~~ | ~~`/{booking_id}`~~ | **Rimosso** — vedi la voce 13 più sotto |
 | 14 | `POST` | `/{booking_id}/status` | Transizione di stato |
 | 15 | `POST` | `/{booking_id}/payment` | Registrazione incasso manuale |
 | 16 | `POST` | `/{booking_id}/extend-hold` | Proroga del blocco temporaneo |
@@ -502,6 +517,8 @@ curl -i -X POST http://localhost:8000/api/v1/bookings/confirm \
 
 Alla cancellazione lo slot torna **immediatamente** prenotabile, e il token viene speso: un secondo tentativo con lo stesso link risponde `400`.
 
+> **Quello che questa tabella non dice, e conviene sapere.** Una disdetta tardiva o una mancata presentazione su `PAY_ON_ARRIVAL` **non costano nulla all'ospite**. Non c'è penale, non c'è carta a garanzia, e l'unico effetto pratico del `409` oltre il termine è che l'ospite non riesce ad annullare da solo: deve telefonare, e finché un admin non interviene lo slot resta occupato. Per la struttura è il caso peggiore — una camera invenduta all'ultimo momento e nessun deterrente. `PricingService.compute_cancellation_penalty` esiste già ma **non è chiamata da nessuna parte**. La soluzione (carta raccolta alla prenotazione con mandato SEPA/SCA, penale addebitata off-session) è tracciata come **debito tecnico #22**: non è una riga da aggiungere qui, richiede un `SetupIntent`, il consenso esplicito dell'ospite e la gestione dell'addebito rifiutato.
+
 **Da dove arriva il token.** È il `MANAGE` emesso alla conferma (endpoint 4) o alla creazione di una prenotazione che nasce già confermata (endpoint 12). Arriva all'ospite nel link *"Gestisci o annulla la prenotazione"* dell'email di riepilogo.
 
 > ⚠️ **Fino allo Step F questo endpoint era irraggiungibile.** Cercava un token `CANCEL` o `MANAGE`, ma nessun percorso di codice ne emetteva uno: la rotta era scritta, testata a livello di servizio e documentata, e nessun client poteva procurarsi la credenziale richiesta. Il difetto è sopravvissuto perché i test del servizio costruivano il token a mano — cosa che un ospite non può fare. Vedi §8bis.11.3.
@@ -532,6 +549,10 @@ Il `404` ha un messaggio **generico e identico** in ogni caso di fallimento: non
 **Test**: `test_lookup_con_dati_errati_non_rivela_nulla`, `test_lookup_con_codice_ed_email_corretti`.
 
 ---
+
+> ⚠️ **Gli endpoint 7, 8 e 9 sono attualmente disattivati nel sorgente** (`src/routers/booking_router.py`: il blocco è racchiuso in una stringa, quindi il codice esiste ma non viene registrato). Chiamarli risponde **`404`**, non `401`: il percorso non esiste proprio.
+>
+> Restano documentati perché il codice c'è e tornerà quando esisterà l'autenticazione dell'ospite finale. I cinque test che li coprono sono marcati `skip` in `test_booking_api.py` con la stessa motivazione — togliere il marcatore è tutto ciò che servirà per sapere se funzionano ancora. **Debito tecnico #23.**
 
 ### 7 · `GET /api/v1/bookings/me`
 
@@ -641,7 +662,7 @@ curl -i -b cookies.txt "http://localhost:8000/api/v1/admin/bookings/?status=CONF
 
 **Logica.** Vista completa: audit, canale di origine, note interne, riferimenti di pagamento e `status_history` con ogni transizione, attore e motivazione.
 
-> Il campo **`version`** restituito qui va rimandato nella `PATCH`. È quello che impedisce a due operatori di sovrascriversi a vicenda.
+> Il campo **`version`** è il contatore di optimistic locking del database. Nessuna rotta lo accetta più in ingresso — la modifica è stata rimossa, vedi la voce 13 — ma resta esposto perché è il valore che un client dovrà rimandare quando quel percorso verrà riscritto.
 
 **Test**: `TestRead::test_dettaglio_con_storico`, `test_dettaglio_inesistente`.
 
@@ -661,6 +682,10 @@ curl -i -b cookies.txt "http://localhost:8000/api/v1/admin/bookings/?status=CONF
 
 **Logica.** L'intestatario è un utente registrato (`user_id`) **oppure** un profilo inserito a mano (`guest`), mai entrambi né nessuno dei due.
 
+> **In pratica, usare `guest`.** Il ramo `user_id` funziona ed è pronto, ma oggi non porta alcun vantaggio: l'unico posto in cui una prenotazione legata a un account si vede è `GET /bookings/me`, che richiede l'autenticazione dell'ospite finale — un percorso che al momento non esiste (le rotte `/me` sono disattivate nel sorgente). Non è un rischio, è semplicemente inutile finché quel percorso non c'è.
+
+> **Le difese del canale pubblico qui non si applicano**, di proposito: niente captcha, niente limite di 3 prenotazioni in sospeso per email, niente rate limit per indirizzo (`enforce_pending_limit=False`). L'admin è un attore fidato e la rotta è già protetta da `is_admin_user` a livello di router. Vale la pena saperlo perché significa che una prenotazione creata da qui **non** ha attraversato nessuno dei controlli anti-abuso descritti al §3.
+
 Con `skip_email_confirmation` attivo — il default — la prenotazione nasce già `CONFIRMED`, senza token e senza blocco temporaneo: è il caso della prenotazione telefonica, dove l'identità è già stata verificata parlando con l'ospite. Disattivandolo si ottiene il flusso normale con conferma via email.
 
 Non serve un preventivo firmato: l'admin è un attore fidato e il prezzo è calcolato dal server. Il percorso di creazione è però **lo stesso del canale pubblico** — lock, liberazione hold scaduti, verifica, exclusion constraint — quindi anche l'admin non può creare overbooking.
@@ -675,34 +700,23 @@ Sono consentite **date nel passato**, per registrare a posteriori un walk-in o c
 
 ---
 
-### 13 · `PATCH /api/v1/admin/bookings/{booking_id}`
+### 13 · `PATCH /api/v1/admin/bookings/{booking_id}` — **RIMOSSO**
 
-**Modifica di date, camere, ospiti, anagrafica e note.**
+**Questa rotta non esiste più.** Un `PATCH` su questo percorso risponde `405`.
 
-| | |
-|:--|:--|
-| **Accesso** | Amministrativo |
-| **Body** | `AdminBookingUpdateSchema` |
-| **Risposta** | `BookingSchema` |
+**Cosa faceva.** Modificava date, camere, ospiti, anagrafica e note, ricalcolando il prezzo e ricostruendo le righe camera. Aveva optimistic locking lato client (`version` → `409`) e sapeva escludere la prenotazione da se stessa nel calcolo dei conflitti, così che allungarla di un giorno non la facesse collidere con le proprie righe.
 
-**Codici**: `200` · `401` · `403` · `404` · `409` version obsoleto, slot occupato, stato terminale · `422` validazione
+**Perché è stata rimossa.** La prenotazione registra **quanto è dovuto** (`total_price`), non **quanto è stato incassato**: non esiste una colonna `amount_paid`. Finché nulla cambia i due valori coincidono e la mancanza non si nota. Ma quando l'admin spostava le date di una prenotazione già saldata e il totale passava da 180 a 240, il database finiva per dire `total_price = 240` con `payment_status = PAID`, e **l'informazione che l'ospite aveva pagato 180 spariva**. Non si poteva più calcolare né un conguaglio né un rimborso, e l'unico modo di recuperare l'importo reale era chiederlo a Stripe.
 
-**Logica.** Copre il caso più frequente del banco: l'ospite telefona per spostare il soggiorno o cambiare camera. Senza questa operazione l'unica via sarebbe cancellare e rifare, perdendo codice, storico e anagrafica.
+Il difetto non era nella rotta ma nel modello, che confonde il dovuto con l'incassato. Rimuovere la rotta è la soluzione onesta finché quel modello non cambia: meglio nessuna modifica che una modifica che distrugge in silenzio un dato contabile.
 
-1. verifica `version` → `409` se un altro operatore ha già salvato;
-2. rifiuta se lo stato è terminale (`CANCELLED`, `EXPIRED`, `COMPLETED`, `NO_SHOW`);
-3. se cambiano date o camere: lock, liberazione hold scaduti, verifica disponibilità **escludendo la prenotazione stessa**, ricalcolo del prezzo, ricostruzione delle righe camera;
-4. aggiorna ospiti, anagrafica e note;
-5. ricalcola il termine di cancellazione se le date sono cambiate;
-6. registra la modifica nello storico con la motivazione.
+**Cosa fare al suo posto.** Annullare la prenotazione (endpoint 14, `new_status = CANCELLED`) e ricrearla (endpoint 12). Si perde il codice prenotazione e si spezza lo storico, ma nessun dato viene falsato. Su una prenotazione già incassata, il rimborso o il conguaglio si concordano con l'ospite e si registrano con l'endpoint 15.
 
-L'esclusione al punto 3 non è un dettaglio: senza, una prenotazione che si allunga di un giorno collidererebbe con le proprie righe e si rifiuterebbe da sola.
+**Cosa serve per riaverla**, in ordine: una colonna `amount_paid` con la relativa migrazione; il calcolo esplicito della differenza fra dovuto e incassato; una decisione su cosa fare quando la differenza è a favore dell'ospite (rimborso automatico? nota di credito? nulla?); e l'email che comunica la modifica, perché una prenotazione che cambia prezzo senza che l'ospite lo sappia è un reclamo garantito. **Debito tecnico #21.**
 
-**L'opzione di pagamento non è modificabile** qui: cambiarla altererebbe prezzo, politica di cancellazione e stato dell'incasso insieme. Se serve, si annulla e si ricrea.
+**Cosa resta in piedi.** Il campo `version` è ancora esposto da `BookingSchema` — è il contatore di optimistic locking del database — e l'eccezione `ConcurrentModification` esiste ancora ma nessun percorso la solleva. Il parametro `exclude_booking_id` resta disponibile nel `BookingRepository`. Sono i pezzi che serviranno quando la modifica verra riscritta.
 
-> **Nessuna email.** A differenza dell'annullamento, la modifica non avvisa l'ospite. Non è una dimenticanza: un messaggio di modifica deve dire *cosa* è cambiato rispetto a prima e se l'ospite debba fare qualcosa, e richiede il confronto fra stato precedente e successivo — un intervento a sé. Fino ad allora la comunicazione resta a chi opera al banco, che comunque sta già parlando con l'ospite.
-
-**Test**: l'intera classe `TestUpdate` (8 test), fra cui `test_version_obsoleto_rifiutato` e `test_allungamento_di_un_giorno_non_collide_con_se_stessa`.
+**Test**: `TestUpdateRimossa::test_patch_non_esiste_piu` verifica che la rotta risponda `405`. Verifica un'assenza, di proposito: una rotta si riaggiunge in tre righe, e un `PATCH` che torna a rispondere `200` senza che nessuno l'abbia deciso è esattamente il modo in cui un problema noto rientra dalla finestra.
 
 ---
 
@@ -767,6 +781,8 @@ L'annullamento libera **immediatamente** lo slot.
 **Logica.** Concede più tempo a un ospite che sta completando la prenotazione. Solo su prenotazioni in stato `PENDING_*`.
 
 Se nel frattempo le camere sono state vendute a qualcun altro la proroga viene respinta: il blocco non si può riattivare su uno slot ormai occupato, e l'exclusion constraint lo impedisce.
+
+> **Endpoint poco usato, tenuto di proposito.** Serve a una situazione reale ma rara: l'ospite al telefono che sta compilando il modulo e sta per scadere. Non ha costi di manutenzione — nessun'altra parte del sistema dipende da lui — e il giorno in cui servisse, riscriverlo costerebbe più di quanto costi lasciarlo. Se dal frontend non verrà mai richiamato, non è un problema.
 
 **Test**: `TestOperations::test_proroga_hold_su_prenotazione_confermata_rifiutata`, `test_proroga_hold_su_prenotazione_in_attesa`.
 
@@ -857,7 +873,6 @@ curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
 | Schema | Campi principali |
 |:--|:--|
 | `AdminBookingCreateSchema` | date, `guest_count`, `room_ids`, `payment_option`, `payment_method?`, **`user_id` XOR `guest`**, `skip_email_confirmation` (default `true`), `mark_as_paid` (default `false`), `admin_notes?` — consente date nel passato |
-| `AdminBookingUpdateSchema` | **`version`** (obbligatorio), date, `guest_count`, `room_ids`, `guest?`, `admin_notes?`, `reason?` — consente date nel passato; l'opzione di pagamento **non** è modificabile |
 | `BookingStatusUpdateSchema` | `new_status`, `reason?` — **obbligatoria** se `new_status = CANCELLED` |
 | `AdminPaymentRegistrationSchema` | `payment_method`, `payment_status`, `amount?` |
 | `BookingExtendHoldSchema` | `minutes` (1–120) |
@@ -934,7 +949,7 @@ curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
 
 Tutti i campi di `BookingPublicSchema`, più: `id`, `source_channel`, `user_id`, `guest_phone`, `payment_method`, `cancelled_at`, `cancellation_reason`, `admin_notes`, `created_at`, `updated_at`, `created_by`, `last_updated_by`, **`version`**, `status_history[]`.
 
-> **`version` è il contatore dell'optimistic locking.** Il frontend lo legge con la `GET` e lo rimanda invariato nella `PATCH`. Se nel frattempo un altro operatore ha salvato, la risposta è `409` e la sua modifica non viene sovrascritta. Volutamente assente da `BookingPublicSchema`: all'ospite non serve.
+> **`version` è il contatore dell'optimistic locking**, mantenuto dal database (`version_id_col`). Oggi nessun endpoint lo accetta in ingresso: la modifica amministrativa è stata rimossa (voce 13, debito #21). Resta esposto perché sarà il valore da rimandare quando quel percorso tornerà. Volutamente assente da `BookingPublicSchema`: all'ospite non serve.
 
 #### `AdminBookingCreatedSchema`
 
@@ -946,7 +961,7 @@ Porta la vista completa, non quella pubblica: l'admin deve vedere audit, canale 
 
 `from_status?` · `to_status` · `actor_type` · `reason?` · `created_at`.
 
-> Lo storico registra **anche le modifiche che non cambiano stato**: una `PATCH` produce una riga con `from_status == to_status` e una descrizione di cosa è cambiato. "Chi ha spostato le date" è esattamente l'informazione che serve in caso di contestazione.
+> Lo storico può registrare **anche modifiche che non cambiano stato**, con una riga in cui `from_status == to_status`. Le scriveva la `PATCH`, oggi rimossa; il meccanismo resta perché "chi ha fatto cosa e quando" è esattamente l'informazione che serve in caso di contestazione, e la modifica tornerà.
 
 #### `BookingListItemSchema` e `PaginatedBookingsSchema`
 
@@ -1019,10 +1034,10 @@ Ogni transizione non prevista produce `409`. Ogni transizione eseguita lascia un
 | `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 26 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email** |
-| `test_admin_booking_api.py` | 32 | sì | Autorizzazione, creazione on-behalf-of, modifica con optimistic locking, stato, incassi |
+| `test_admin_booking_api.py` | 25 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, incassi |
 | `test_email_service.py` | 17 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale |
-| `test_booking_expiration.py` | 15 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin |
-| **Totale eseguito** | **~172** | | il test di concorrenza è parametrizzato su 10 iterazioni |
+| `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
+| **Totale eseguito** | **~169** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
 
 ### Il test che conta più di tutti
 
@@ -1077,10 +1092,8 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Creazione per conto di terzi con ospite manuale → nasce `CONFIRMED`, nessun token
 - [ ] Creazione con `user_id` → anagrafica presa dal profilo
 - [ ] Creazione con `user_id` **e** `guest` insieme → `422`
-- [ ] `PATCH` che sposta le date → prezzo ricalcolato, righe camera riallineate
-- [ ] `PATCH` con `version` obsoleto → `409` "modificata da un altro operatore"
-- [ ] `PATCH` verso uno slot occupato → `409`
-- [ ] `PATCH` su prenotazione annullata → `409`
+- [ ] `PATCH /admin/bookings/{id}` → **`405`**: la rotta di modifica è stata rimossa (voce 13)
+- [ ] Spostamento di una prenotazione: annullamento (endpoint 14) + ricreazione (endpoint 12) → il vecchio slot torna prenotabile, il nuovo risulta occupato
 - [ ] Check-in registrato prima della data di arrivo → `409`
 - [ ] Annullamento senza motivazione → `422`
 - [ ] Annullamento → lo slot torna immediatamente prenotabile
@@ -1111,6 +1124,13 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Il link di conferma di una prenotazione scaduta non funziona più
 - [ ] Nel dettaglio admin, l'ultima riga di storico ha attore `SYSTEM`
 - [ ] Con `SWEEPER_ENABLED=false` nulla scade da solo, ma l'endpoint 17 funziona
+
+### Token
+
+- [ ] Confermare una prenotazione e leggere `expires_at` del token `MANAGE` a database: deve cadere alla **mezzanotte del check-in**, non della partenza
+- [ ] Portare a mano un token a `expires_at = now() - 1 giorno` → dopo una pulizia forzata è **ancora in tabella** (soglia di ritenzione)
+- [ ] Portarlo a `now() - 120 giorni` → dopo la pulizia **non c'è più**
+- [ ] Nel log dello sweeper compare `Pulizia token: N righe scadute eliminate` al massimo una volta al giorno
 
 ---
 
@@ -1178,6 +1198,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 26/09/2026 | **—** | **Rimossa la `PATCH` di modifica**: ricalcolava il totale senza sapere quanto fosse stato incassato (debito #21) · token `MANAGE` scade al **check-in** invece che alla partenza · pulizia dei token scaduti oltre i 30 giorni, agganciata allo sweeper con cadenza giornaliera · intervallo sweeper 60 → 300 s · politica di cancellazione documentata per esteso |
 | 20/09/2026 | **G** | Pagamenti Stripe a incasso differito (documento a parte: `payment_api.md`) · quinto template email `booking_slot_lost` · lo sweeper rilascia le autorizzazioni prima di liberare gli slot |
 | 20/09/2026 | **F** | `configure_logging()`: i log applicativi avevano un logger ma nessun handler, quindi venivano scartati in silenzio · servizio email con 4 template HTML+testo · sweeper delle scadenze in `lifespan` · `POST /admin/bookings/sweep-expired` · **token `MANAGE` finalmente emesso: `POST /cancel` era irraggiungibile** · invio post-commit con `BackgroundTasks` · `FOR UPDATE SKIP LOCKED` sullo sweeper · nessuna email su `PENDING_PAYMENT` |
 | 20/09/2026 | **E** | 7 endpoint amministrativi · **`POST /me/{code}/cancel` ora usa il codice invece dell'`id` interno** (era inutilizzabile dal client) · modifica di date e camere con ricalcolo prezzo · optimistic locking esposto al client (`version`) · `ConcurrentModification` · storico esteso alle modifiche non di stato |
@@ -1193,7 +1214,8 @@ chiama.
 | Step | Contenuto | Impatto su questo documento |
 |:--|:--|:--|
 | **G** | Pagamenti Stripe | Endpoint webhook e creazione Payment Intent; codici `402`; l'email di conferma per le prenotazioni `PAY_NOW` partirà da lì |
-| — | Email di modifica | Un messaggio che dica *cosa* è cambiato quando l'admin sposta date o camere (endpoint 13) |
+| **#21** | Modifica della prenotazione | Colonna `amount_paid`, calcolo del conguaglio, email di modifica. Fino ad allora la rotta resta rimossa |
+| **#22** | Carta a garanzia e penale | `SetupIntent` con mandato, addebito off-session su disdetta tardiva e no-show |
 | — | Outbox pattern | Oggi un'email persa fra commit e invio non lascia traccia. Con un outbox l'invio diventa ritentabile |
 
 ---

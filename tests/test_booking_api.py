@@ -7,6 +7,8 @@ la verifica manuale da Swagger con una ri-eseguibile.
 """
 from datetime import date, timedelta
 
+import pytest
+
 from src.config.config import settings
 
 BASE = "/api/v1/bookings"
@@ -249,12 +251,31 @@ async def test_token_di_conferma_non_esposto_con_email_attiva(
 # ===========================================================================
 # Endpoint autenticati
 # ===========================================================================
+#
+# I cinque test di questa sezione sono sospesi insieme alle rotte che
+# verificano. Non sono rotti: falliscono perché il blocco `/me` di
+# `booking_router.py` è stato disattivato, e un `404` al posto di un `401` è
+# esattamente ciò che ci si aspetta quando un endpoint non è registrato.
+#
+# Restano qui, e marcati uno per uno invece che cancellati, perché sono la
+# specifica di quelle rotte: il giorno in cui l'autenticazione dell'ospite
+# finale esisterà, togliere il marcatore è tutto ciò che serve per sapere se
+# funzionano ancora.
 
+ROTTE_ME_DISATTIVATE = pytest.mark.skip(
+    reason="Le rotte /me sono disattivate in booking_router.py: il blocco è "
+           "racchiuso in una stringa. Riattivandole, togliere questo marcatore "
+           "dai cinque test. Debito tecnico #23."
+)
+
+
+@ROTTE_ME_DISATTIVATE
 async def test_le_mie_prenotazioni_richiedono_autenticazione(api_client):
     response = await api_client.get(f"{BASE}/me")
     assert response.status_code == 401
 
 
+@ROTTE_ME_DISATTIVATE
 async def test_creazione_utente_richiede_autenticazione(api_client):
     response = await api_client.post(
         f"{BASE}/me", json={"quote_token": "x" * 40, "accept_terms": True}
@@ -262,6 +283,7 @@ async def test_creazione_utente_richiede_autenticazione(api_client):
     assert response.status_code == 401
 
 
+@ROTTE_ME_DISATTIVATE
 async def test_prenotazione_utente_autenticato_viene_persistita(
         user_client, rooms, regular_user
 ):
@@ -299,6 +321,7 @@ async def test_prenotazione_utente_autenticato_viene_persistita(
     assert booking["code"] in [item["code"] for item in elenco.json()]
 
 
+@ROTTE_ME_DISATTIVATE
 async def test_utente_cancella_la_propria_prenotazione(user_client, rooms):
     """
     La cancellazione usa il **codice**, non l'identificativo interno: è l'unico
@@ -555,6 +578,7 @@ async def test_un_canale_email_guasto_non_impedisce_la_prenotazione(
     assert response.status_code == 201, response.text
 
 
+@ROTTE_ME_DISATTIVATE
 async def test_la_prenotazione_di_un_utente_autenticato_avvisa_il_suo_indirizzo(
         user_client, regular_user, rooms, email_backend
 ):

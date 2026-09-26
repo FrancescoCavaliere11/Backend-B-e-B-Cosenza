@@ -82,7 +82,16 @@ class Settings(BaseSettings):
     #: Prefisso del codice prenotazione leggibile (es. "BB-2026-000123").
     booking_code_prefix: str = "BB"
     #: Intervallo di esecuzione dello sweeper delle prenotazioni scadute.
-    sweeper_interval_seconds: int = 60
+    #:
+    #: Cinque minuti, non uno: la query costa poco, ma ogni passata interroga
+    #: Stripe per ogni autorizzazione ancora viva, e a sessanta secondi lo fa
+    #: sessanta volte l'ora senza che nulla sia cambiato.
+    #:
+    #: Non si allunga oltre. Un pagamento abbandonato lascia su Stripe un
+    #: intent **ancora pagabile**: finché non lo annulliamo, l'ospite che
+    #: ritrova la scheda aperta può completarlo su una prenotazione che noi
+    #: consideriamo persa. Questo intervallo è la durata di quella finestra.
+    sweeper_interval_seconds: int = 300
     #: Avvio automatico dello sweeper insieme all'applicazione. Disattivabile
     #: quando si preferisce pilotarlo da `POST /admin/bookings/sweep-expired`
     #: o da uno scheduler esterno.
@@ -98,6 +107,25 @@ class Settings(BaseSettings):
     #: l'ospite ha dimenticato da un pezzo è solo un modo per farsi segnalare
     #: come spam.
     sweeper_notify_max_age_hours: int = 24
+    #: Giorni per cui un token già scaduto resta in tabella prima di essere
+    #: eliminato.
+    #:
+    #: Non serve a poter ancora spendere il token — scaduto è scaduto — ma a
+    #: rispondere all'ospite che scrive "il link non mi è mai arrivato": in
+    #: tabella c'è solo l'hash, quindi l'unica cosa ricostruibile è *se* e
+    #: *quando* un token era stato emesso. Per una contestazione del genere un
+    #: mese è abbondante.
+    token_retention_days: int = 30
+    #: Ogni quante ore lo sweeper esegue la pulizia dei token scaduti.
+    #:
+    #: È manutenzione, non correttezza: nulla dipende dal fatto che una riga
+    #: scaduta sparisca entro un minuto. Farla girare insieme alle passate
+    #: ordinarie sarebbe una DELETE ogni cinque minuti per liberare, quasi
+    #: sempre, zero righe.
+    token_purge_interval_hours: int = 24
+    #: Token eliminati al massimo in una singola pulizia. Limita la durata
+    #: della transazione e il numero di righe bloccate in una volta sola.
+    token_purge_batch_size: int = 1000
     #: Tetto alla validità del token di gestione inviato con l'email di
     #: conferma. Normalmente il token scade alla partenza; questo limite entra
     #: in gioco solo per soggiorni prenotati con grande anticipo, perché un

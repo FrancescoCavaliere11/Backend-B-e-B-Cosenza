@@ -174,6 +174,14 @@ class ConcurrentModification(AppException):
     salva dieci minuti dopo l'altro. Il client presenta la `version` che ha
     letto; se non coincide con quella a database, la modifica viene respinta
     invece di sovrascrivere silenziosamente.
+
+    **Attualmente nessun percorso la solleva.** L'unico che lo faceva era la
+    modifica amministrativa, rimossa perché non sapeva trattare le
+    prenotazioni già incassate (debito tecnico #21). La classe resta qui, e
+    non è dimenticanza: la modifica tornerà, e con lei il conflitto fra due
+    operatori sulla stessa prenotazione. Le scritture concorrenti nella stessa
+    transazione restano comunque coperte, da `StaleDataError` e dal suo
+    handler in `exception_handler.py`.
     """
     status_code = 409
     default_message = (

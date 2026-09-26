@@ -17,6 +17,13 @@ avere uno sweeper autosufficiente.
 mail spedita in una transazione che poi fa rollback annuncia all'ospite una
 scadenza che non è avvenuta — e quella mail non si richiama indietro.
 
+**La pulizia dei token viaggia sullo stesso ciclo, ma con la sua cadenza.**
+Eliminare i token scaduti è manutenzione: nulla dipende dal fatto che avvenga
+entro un minuto, e farla a ogni passata sarebbe una DELETE ogni cinque minuti
+per liberare quasi sempre zero righe. Riusa comunque questo ciclo invece di un
+secondo task: un `while` in più da avviare, fermare e sorvegliare, per una
+query al giorno, non si ripaga.
+
 **Le autorizzazioni si annullano prima di liberare lo slot** (Step G). Una
 prenotazione in attesa di pagamento può avere un'autorizzazione viva su
 Stripe: rivendere quella camera senza prima rilasciarla significherebbe poter
@@ -27,7 +34,7 @@ costa una notte; un incasso senza camera costa molto di più.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -105,6 +112,10 @@ class BookingExpirationService:
         self._email_service = email_service
         self._gateway = gateway
         self._task: Optional[asyncio.Task] = None
+        # Istante dell'ultima pulizia dei token. `None` significa "mai in
+        # questo processo": la prima passata dopo l'avvio la esegue, così un
+        # riavvio quotidiano non la rimanda all'infinito.
+        self._last_token_purge: Optional[datetime] = None
         # Creato in `start()`, non qui: su Python 3.9 un `asyncio.Event`
         # costruito fuori da un event loop si lega a quello sbagliato, e il
         # servizio viene istanziato prima che il loop sia in esecuzione.
@@ -158,6 +169,49 @@ class BookingExpirationService:
             notified_count=notified,
             swept_at=datetime.now(timezone.utc),
         )
+
+    # ------------------------------------------------------------------ #
+    # Pulizia dei token                                                   #
+    # ------------------------------------------------------------------ #
+
+    async def purge_tokens_if_due(self, force: bool = False) -> int:
+        """
+        Esegue la pulizia dei token scaduti se è passato abbastanza tempo.
+
+        Il tempo si misura da quando la pulizia è stata *tentata*, e il
+        segnaposto viene spostato prima di eseguirla: se la DELETE fallisce
+        non si riprova cinque minuti dopo, e poi di nuovo, e di nuovo. È
+        manutenzione — può aspettare il giorno seguente.
+
+        Un fallimento non si propaga: interrompere la passata dello sweeper
+        perché non si è riusciti a cancellare righe scadute significherebbe
+        far dipendere la liberazione degli slot dalla pulizia di una tabella.
+
+        :param force: esegue comunque, ignorando la cadenza. Serve ai test e a
+            una pulizia manuale.
+        :return: numero di token eliminati, `0` anche quando non era il turno.
+        """
+        now = datetime.now(timezone.utc)
+
+        if not force and self._last_token_purge is not None:
+            atteso = timedelta(hours=settings.token_purge_interval_hours)
+            if now - self._last_token_purge < atteso:
+                return 0
+
+        self._last_token_purge = now
+
+        try:
+            async with self._session_factory() as session:
+                service = build_booking_service(session)
+                eliminati = await service.purge_expired_tokens()
+        except Exception:
+            logger.exception("Pulizia dei token fallita; riprovo al prossimo turno")
+            return 0
+
+        if eliminati:
+            logger.info("Pulizia token: %d righe scadute eliminate", eliminati)
+
+        return eliminati
 
     # ------------------------------------------------------------------ #
     # Autorizzazioni                                                      #
@@ -249,9 +303,11 @@ class BookingExpirationService:
         giorni — il modo peggiore di guastarsi.
         """
         logger.info(
-            "Sweeper avviato: intervallo %d secondi, lotti da %d",
+            "Sweeper avviato: intervallo %d secondi, lotti da %d, "
+            "pulizia token ogni %d ore",
             settings.sweeper_interval_seconds,
             settings.sweeper_batch_size,
+            settings.token_purge_interval_hours,
         )
 
         while not self._stopping.is_set():
@@ -261,6 +317,12 @@ class BookingExpirationService:
                 raise
             except Exception:
                 logger.exception("Passata dello sweeper fallita; riprovo al prossimo giro")
+
+            # Dopo la passata, mai prima: liberare gli slot è il lavoro per
+            # cui questo ciclo esiste, la pulizia è ciò che si fa se avanza
+            # tempo. Non serve un `try` qui: `purge_tokens_if_due` cattura già
+            # tutto al proprio interno.
+            await self.purge_tokens_if_due()
 
             try:
                 # `wait_for` sull'evento invece di uno `sleep` secco: allo

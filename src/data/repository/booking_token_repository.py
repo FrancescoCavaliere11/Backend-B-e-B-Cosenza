@@ -114,20 +114,27 @@ class BookingTokenRepository:
         result = await self.session.execute(statement)
         return result.rowcount or 0
 
-    async def purge_expired(self, limit: int = 1000) -> int:
+    async def purge_expired(self, older_than: datetime, limit: int = 1000) -> int:
         """
-        Elimina i token scaduti da tempo.
+        Elimina i token scaduti prima di una certa data.
 
         Manutenzione periodica: un token scaduto non è più spendibile, ma
         lasciarlo in tabella fa crescere un indice senza alcun beneficio.
 
+        La soglia arriva da fuori invece di essere calcolata qui: *per quanto
+        tempo* conservare una riga scaduta è una decisione di business, e il
+        repository non è il posto in cui prenderla. Riceve una data e cancella
+        ciò che sta prima.
+
+        :param older_than: vengono eliminati solo i token la cui scadenza è
+            anteriore a questo istante. Chi chiama lo arretra rispetto ad ora
+            per non cancellare ciò che è appena scaduto.
+        :param limit: tetto alle righe eliminate in una singola chiamata.
         :return: numero di token eliminati.
         """
-        now = datetime.now(timezone.utc)
-
         expired_ids = (
             select(BookingToken.id)
-            .where(BookingToken.expires_at < now)
+            .where(BookingToken.expires_at < older_than)
             .limit(limit)
         )
         result = await self.session.execute(expired_ids)

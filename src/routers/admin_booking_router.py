@@ -10,6 +10,15 @@ divergerebbero alla prima dipendenza aggiunta.
 
 Come nel router pubblico, nessun `try/except`: le eccezioni di dominio sono
 tutte `AppException` e vengono tradotte dall'handler globale.
+
+**Non esiste una rotta di modifica.** C'era, ed è stata rimossa: ricalcolava
+il totale senza sapere quanto fosse già stato incassato, perché la
+prenotazione registra ciò che è dovuto e non ciò che è stato pagato. Su una
+prenotazione saldata la modifica cancellava quindi in silenzio l'unica traccia
+dell'importo reale, rendendo impossibile calcolare a posteriori un conguaglio
+o un rimborso. Finché quel modello non cambia, una prenotazione pagata si
+annulla e si ricrea — un'operazione in più al banco, ma nessun dato perduto.
+Il dettaglio è nel debito tecnico #21.
 """
 from datetime import date, datetime, timezone
 from typing import Annotated, List, Optional
@@ -22,7 +31,6 @@ from src.data.model.user import User
 from src.data.schemas.booking_schema import (
     AdminBookingCreateSchema,
     AdminBookingCreatedSchema,
-    AdminBookingUpdateSchema,
     AdminPaymentRegistrationSchema,
     BookingExtendHoldSchema,
     BookingSchema,
@@ -110,8 +118,10 @@ async def get_booking(
     Vista completa: audit, canale di origine, note interne, riferimenti di
     pagamento e storico delle transizioni.
 
-    Il campo `version` restituito qui va rimandato nella `PATCH`: è quello che
-    impedisce a due operatori di sovrascriversi a vicenda.
+    Il campo `version` è il contatore dell'optimistic locking del database.
+    Nessuna rotta lo accetta più in ingresso — la modifica è stata rimossa —
+    ma resta esposto perché è ciò che un client dovrà rimandare quando quel
+    percorso verrà riscritto.
     """
     return await service.get_admin_booking(booking_id)
 
@@ -158,40 +168,6 @@ async def create_booking(
     return AdminBookingCreatedSchema(
         booking=result.booking, confirmation_token=result.confirmation_token
     )
-
-
-@admin_booking_router.patch(
-    "/{booking_id}",
-    response_model=BookingSchema,
-    summary="Modifica date, camere, ospiti, anagrafica o note",
-)
-async def update_booking(
-        booking_id: UUID,
-        payload: AdminBookingUpdateSchema,
-        current_user: Annotated[User, Depends(is_admin_user)],
-        service: Annotated[BookingService, Depends(get_booking_service)],
-) -> BookingSchema:
-    """
-    Copre il caso più frequente del banco: l'ospite telefona per spostare il
-    soggiorno o cambiare camera.
-
-    `version` deve corrispondere al valore letto con `GET /{booking_id}`,
-    altrimenti la risposta è `409`: significa che un altro operatore ha salvato
-    nel frattempo e la modifica sovrascriverebbe il suo lavoro.
-
-    Se cambiano date o camere il prezzo viene ricalcolato e le righe camera
-    ricostruite. Lo spostamento su uno slot già occupato risponde `409`.
-    Una prenotazione in stato terminale non è modificabile.
-
-    TODO [email di modifica]: questo endpoint **non** avvisa l'ospite, a
-      differenza dell'annullamento. Non è una dimenticanza: un messaggio di
-      modifica deve dire *cosa* è cambiato rispetto a prima e se l'ospite debba
-      fare qualcosa, e richiede quindi il confronto fra stato precedente e
-      successivo — un lavoro a sé, non una riga in coda a questa funzione. Fino
-      ad allora la comunicazione resta a carico di chi opera al banco, che
-      comunque sta già parlando con l'ospite al telefono.
-    """
-    return await service.admin_update_booking(booking_id, payload, current_user.id)
 
 
 @admin_booking_router.post(

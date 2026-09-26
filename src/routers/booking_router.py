@@ -307,7 +307,7 @@ async def lookup_booking(
 # Endpoint per utenti autenticati                                              #
 # --------------------------------------------------------------------------- #
 
-@booking_router.get(
+''' @booking_router.get(
     "/me",
     response_model=List[BookingPublicSchema],
     summary="Le mie prenotazioni",
@@ -339,8 +339,7 @@ async def create_user_booking(
     """
     result = await service.create_user_booking(payload, current_user)
     schedule_creation_email(background, result)
-    return _to_created_response(result)
-
+    return _to_created_response(result) 
 
 @booking_router.post(
     "/me/{code}/cancel",
@@ -367,4 +366,4 @@ async def cancel_my_booking(
     booking = await service.cancel_own_booking(code, current_user, payload.reason)
 
     background.add_task(get_email_service().send_booking_cancelled, booking)
-    return booking
+    return booking '''

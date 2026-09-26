@@ -300,6 +300,43 @@ Per ogni prenotazione in attesa di pagamento con blocco scaduto:
 L'ultimo caso è la scelta prudente: uno slot invenduto per un'ora costa una
 notte, un incasso senza camera costa molto di più.
 
+### A cosa serve davvero, in concreto
+
+Vale la pena essere precisi, perché la risposta intuitiva è sbagliata.
+
+**Non serve a sbloccare soldi sulla carta dell'ospite.** Chi abbandona il
+checkout *prima* di inserire la carta non ha nulla di bloccato: l'intent
+esiste, ma non ha mai toccato un metodo di pagamento. Su questo caso — che è
+la stragrande maggioranza degli abbandoni — lo sweeper non restituisce niente
+a nessuno.
+
+**Serve a rendere non pagabile un pagamento abbandonato.** Finché l'intent è
+aperto, è ancora completabile: l'ospite che ritrova la scheda del browser
+qualche ora dopo e preme "Paga" manda a buon fine il pagamento di una
+prenotazione che noi consideriamo persa. A quel punto il webhook fa il suo
+lavoro — rilegge la disponibilità, trova lo slot venduto, rilascia e manda
+`booking_slot_lost` — quindi nessuno viene addebitato per una camera che non
+esiste, ma l'ospite ha comunque vissuto un pagamento che sembra riuscito e
+poi si annulla. Annullando l'intent, quel pulsante semplicemente non funziona
+più. **È per questo che l'intervallo dello sweeper non si allunga oltre i
+cinque minuti**: è la durata di quella finestra.
+
+**Serve come via di recupero se una notifica si perde.** Se l'ospite ha
+pagato ma il webhook non ci è mai arrivato — deploy in corso, server
+irraggiungibile — l'importo *è* bloccato sulla sua carta e noi non lo
+sappiamo. Stripe ritenta per tre giorni, ma se il nostro endpoint avesse
+risposto `200` per sbaglio quei ritentativi non ci sarebbero. Lo sweeper prova
+ad annullare, Stripe risponde che è già incassabile, e la prenotazione viene
+confermata: è la seconda riga della tabella qui sopra, ed è l'unico percorso
+che recupera una notifica persa del tutto.
+
+> **Quello che tiene in piedi la correttezza non è lo sweeper.** È il
+> ricontrollo nel webhook (§5.3). La *just-in-time expiration* può liberare
+> uno slot su cui esiste ancora un'autorizzazione viva, senza passare da qui:
+> quando poi quel pagamento arriva, `authorize_payment` solleva
+> `RoomNotAvailable` e l'autorizzazione viene rilasciata. Lo sweeper riduce la
+> probabilità che succeda; non è ciò che impedisce l'incasso senza camera.
+
 ---
 
 ## 7. Schemi
@@ -385,6 +422,7 @@ localhost:8000/api/v1/payments/webhook`.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 26/09/2026 | **—** | Intervallo dello sweeper 60 → 300 s · §6 spiega a cosa serve davvero il rilascio delle autorizzazioni (rendere non pagabile un checkout abbandonato, non sbloccare denaro) |
 | 20/09/2026 | **G** | Payment Intent a incasso differito · webhook firmato e idempotente · verifica dell'importo e dello slot prima dell'incasso · rilascio dell'autorizzazione se lo slot è perduto · sweeper che annulla le autorizzazioni prima di liberare · email `booking_slot_lost` |
 
 ---

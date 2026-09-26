@@ -12,8 +12,9 @@ La scadenza viene simulata spostando `hold_expires_at` nel passato con una
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
-from src.data.enumerators import BookingStatus
+from src.data.enumerators import BookingStatus, BookingTokenPurpose
 from src.data.model.booking import Booking
 from src.data.model.booking_room_item import BookingRoomItem
 from src.data.model.booking_status_history import BookingStatusHistory
@@ -74,9 +75,45 @@ async def _age_hold(session, code: str, minutes_ago: int = 1) -> None:
     await session.commit()
 
 
+async def _age_tokens(session, booking_id, days: int) -> None:
+    """Sposta indietro nel tempo la scadenza dei token di una prenotazione."""
+    await session.execute(
+        update(BookingToken)
+        .where(BookingToken.booking_id == booking_id)
+        .values(expires_at=datetime.now(timezone.utc) - timedelta(days=days))
+    )
+    await session.commit()
+
+
+async def _count_tokens(session, booking_id) -> int:
+    result = await session.execute(
+        select(BookingToken).where(BookingToken.booking_id == booking_id)
+    )
+    return len(result.scalars().all())
+
+
 async def _reload(session, code: str) -> Booking:
-    session.expire_all()
-    result = await session.execute(select(Booking).where(Booking.code == code))
+    """
+    Rilegge una prenotazione scavalcando la cache della sessione.
+
+    **Non usare `session.expire_all()` qui.** Fa la cosa giusta per la
+    prenotazione — la costringe a rileggere da database, che è il punto — ma la
+    fa per *ogni* oggetto della sessione, comprese le camere della fixture
+    `rooms`. Il primo accesso successivo a `rooms[1].id` scatena allora un
+    caricamento pigro fuori dal contesto asincrono, e il test muore con
+    `MissingGreenlet` in un punto che non c'entra nulla con ciò che sta
+    verificando.
+
+    `populate_existing=True` ottiene lo stesso risultato restando circoscritto
+    a questa query. Il `selectinload` serve perché l'opzione aggiorna le
+    colonne ma non ricaricherebbe la collezione.
+    """
+    result = await session.execute(
+        select(Booking)
+        .where(Booking.code == code)
+        .options(selectinload(Booking.items))
+        .execution_options(populate_existing=True)
+    )
     return result.scalar_one()
 
 
@@ -369,3 +406,103 @@ async def test_un_utente_semplice_non_puo_eseguire_lo_sweeper(user_client):
 async def test_senza_autenticazione_lo_sweeper_e_inaccessibile(api_client):
     response = await api_client.post(f"{ADMIN_BASE}/sweep-expired")
     assert response.status_code == 401
+
+
+# ===========================================================================
+# Scadenza e pulizia dei token
+# ===========================================================================
+
+async def test_il_token_di_gestione_scade_all_arrivo(api_client, rooms, session):
+    """
+    Non alla partenza, come faceva prima.
+
+    Dal check-in in poi non c'è più nulla che quel token consenta di fare:
+    `_assert_guest_can_cancel` richiede lo stato `CONFIRMED`, e dalla
+    registrazione dell'arrivo la prenotazione è `CHECKED_IN`. Farlo vivere
+    fino alla partenza significava tenere in circolazione, dentro un'email,
+    una credenziale che non apre più nulla.
+    """
+    created = await _create_pending(api_client, rooms[0].id)
+
+    confirm = await api_client.post(
+        f"{BASE}/confirm", json={"token": created["confirmation_token"]}
+    )
+    assert confirm.status_code == 200, confirm.text
+
+    booking = await _reload(session, created["booking"]["code"])
+    result = await session.execute(
+        select(BookingToken).where(
+            BookingToken.booking_id == booking.id,
+            BookingToken.purpose == BookingTokenPurpose.MANAGE,
+        )
+    )
+    token = result.scalar_one()
+
+    assert token.expires_at.date() == CHECK_IN
+    assert token.expires_at.date() != CHECK_OUT
+
+
+async def test_la_pulizia_non_tocca_i_token_scaduti_da_poco(
+        api_client, rooms, session, session_factory, email_backend
+):
+    """
+    La soglia di ritenzione esiste per questo: un token scaduto ieri è
+    l'unica traccia che possiamo consultare se l'ospite scrive che il link
+    non gli è mai arrivato.
+    """
+    created = await _create_pending(api_client, rooms[0].id)
+    booking = await _reload(session, created["booking"]["code"])
+
+    await _age_tokens(session, booking.id, days=1)
+    eliminati = await _sweeper(session_factory, email_backend).purge_tokens_if_due(
+        force=True
+    )
+
+    assert eliminati == 0
+    assert await _count_tokens(session, booking.id) > 0
+
+
+async def test_la_pulizia_elimina_i_token_scaduti_da_tempo(
+        api_client, rooms, session, session_factory, email_backend
+):
+    created = await _create_pending(api_client, rooms[0].id)
+    booking = await _reload(session, created["booking"]["code"])
+    prima = await _count_tokens(session, booking.id)
+    assert prima > 0
+
+    await _age_tokens(session, booking.id, days=120)
+    eliminati = await _sweeper(session_factory, email_backend).purge_tokens_if_due(
+        force=True
+    )
+
+    assert eliminati >= prima
+    assert await _count_tokens(session, booking.id) == 0
+
+
+async def test_la_pulizia_rispetta_la_cadenza(
+        api_client, rooms, session, session_factory, email_backend
+):
+    """
+    Senza il controllo di cadenza la DELETE girerebbe a ogni passata dello
+    sweeper — ogni cinque minuti — per liberare quasi sempre zero righe.
+    """
+    sweeper = _sweeper(session_factory, email_backend)
+
+    primo = await _create_pending(api_client, rooms[0].id)
+    booking_uno = await _reload(session, primo["booking"]["code"])
+    await _age_tokens(session, booking_uno.id, days=120)
+
+    assert await sweeper.purge_tokens_if_due() > 0
+
+    # Secondo giro a distanza di un istante: c'è di nuovo lavoro da fare, ma
+    # non è ancora il turno.
+    secondo = await _create_pending(api_client, rooms[1].id)
+    booking_due = await _reload(session, secondo["booking"]["code"])
+    await _age_tokens(session, booking_due.id, days=120)
+
+    assert await sweeper.purge_tokens_if_due() == 0
+    assert await _count_tokens(session, booking_due.id) > 0
+
+    # Con `force` il lavoro arretrato viene comunque smaltito.
+    assert await sweeper.purge_tokens_if_due(force=True) > 0
+    assert await _count_tokens(session, booking_due.id) == 0
