@@ -28,6 +28,20 @@ class Settings(BaseSettings):
     #: backend in query string: la SPA lo inoltra nel body di una POST.
     frontend_base_url: str = "http://localhost:4200"
 
+    #: Eco delle query SQL di SQLAlchemy nei log.
+    #:
+    #: **`False` è l'unico valore accettabile fuori dallo sviluppo.** L'eco non
+    #: registra solo la query ma anche i suoi parametri, e i parametri di un
+    #: `INSERT INTO bookings` sono nome, cognome, email e telefono dell'ospite.
+    #: Finirebbero in chiaro nei log applicativi, che hanno durata,
+    #: destinazione e pubblico diversi dal database — rotazione, aggregatori,
+    #: backup non classificati come contenenti dati personali.
+    #:
+    #: Anche in sviluppo conviene tenerlo spento salvo quando serve davvero:
+    #: il volume delle query sommerge le righe applicative, al punto che al
+    #: primo avvio dello sweeper la sua riga di log era illeggibile.
+    db_echo: bool = False
+
     #: Soglia dei log applicativi (`src.*`). Vale solo per il codice del
     #: progetto: i log di uvicorn e di SQLAlchemy restano governati dalle loro
     #: configurazioni.

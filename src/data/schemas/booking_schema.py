@@ -25,6 +25,7 @@ from src.data.enumerators import (
     AuditActorType,
     BookingChannel,
     BookingStatus,
+    GuestCancellationBlock,
     PaymentMethod,
     PaymentOption,
     PaymentStatus,
@@ -346,6 +347,20 @@ class BookingCancelSchema(CustomModel):
     reason: Optional[str] = Field(default=None, max_length=500)
 
 
+class BookingManageRequestSchema(CustomModel):
+    """
+    Lettura di una prenotazione dal link di gestione.
+
+    Stesso token di `BookingCancelSchema`, senza `reason`: qui non si cancella
+    nulla. Schema separato e non riuso del precedente perché i due endpoint
+    hanno cicli di vita diversi — questo è idempotente, quello consuma il
+    token — e un campo `reason` accettato su una lettura sarebbe solo un
+    invito a fraintendere.
+    """
+
+    token: str = Field(min_length=20, max_length=512)
+
+
 class OwnBookingCancelSchema(CustomModel):
     """
     Cancellazione da parte dell'utente autenticato intestatario.
@@ -466,6 +481,35 @@ class BookingPublicSchema(CustomModel):
     confirmed_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class GuestCancellationPolicySchema(CustomModel):
+    """
+    Se e a quali condizioni l'ospite può cancellare da sé.
+
+    Serve alla pagina di gestione per **dire all'ospite cosa succederà prima
+    che clicchi**, invece di scoprirlo con un `409`. Proviene dalla stessa
+    funzione che `POST /cancel` usa per decidere, quindi ciò che la pagina
+    mostra e ciò che l'endpoint farà non possono divergere.
+    """
+
+    #: `true` se `POST /cancel` andrebbe a buon fine adesso.
+    can_cancel: bool
+    #: Valorizzato solo quando `can_cancel` è `false`.
+    blocked_by: Optional[GuestCancellationBlock] = None
+    #: Lo stesso messaggio che `POST /cancel` restituirebbe nel `409`.
+    #: Utilizzabile così com'è, o sostituibile dal frontend usando
+    #: `blocked_by`.
+    message: Optional[str] = None
+    #: Termine entro cui la cancellazione è gratuita, quando esiste.
+    free_until: Optional[datetime] = None
+
+
+class BookingManageSchema(CustomModel):
+    """Risposta di `POST /bookings/manage`."""
+
+    booking: BookingPublicSchema
+    cancellation: GuestCancellationPolicySchema
 
 
 class BookingCreatedSchema(CustomModel):

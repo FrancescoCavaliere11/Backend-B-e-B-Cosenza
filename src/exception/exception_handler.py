@@ -1,14 +1,17 @@
+import logging
 from json import JSONDecodeError
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from pydantic import ValidationError
 from sqlalchemy.orm.exc import StaleDataError
 from starlette import status
 from starlette.responses import JSONResponse
 
 from src.exception.custom_exception import AppException, RateLimitExceeded
+
+logger = logging.getLogger(__name__)
 
 
 #: Chiavi rimosse dal dettaglio errori prima di restituirlo al client.
@@ -91,12 +94,31 @@ def _build_error_message(first_error: Dict[str, Any]) -> str:
 
 def setup_exception_handler(app: FastAPI):
     # ------------------------------------------------------------------ #
-    # Errori di validazione (Pydantic / FastAPI)                          #
+    # Errori di validazione: due colpevoli diversi                        #
     # ------------------------------------------------------------------ #
+    # La stessa `ValidationError` di Pydantic nasce in due situazioni opposte:
+    # il **client** manda dati che non rispettano lo schema di richiesta, o il
+    # **server** sbaglia a costruire un modello di risposta. Trattarle allo
+    # stesso modo — un `422` con "il campo X è obbligatorio" — manda la
+    # diagnosi nella direzione sbagliata: chi riceve quel messaggio cerca nel
+    # proprio payload un campo che non ha mai inviato.
+    #
+    # Non è teoria: è già successo due volte in questo progetto. Allo Step E
+    # `version` era stato aggiunto a `BookingSchema` senza valorizzarlo in
+    # `_to_admin_schema`, e 27 test rispondevano `422` accusando il chiamante
+    # di un errore del server.
+    #
+    # Il confine è tracciato dal **tipo** dell'eccezione, non da un'euristica:
+    # FastAPI solleva `RequestValidationError` quando valida una richiesta, e
+    # le dipendenze che compongono un modello a mano fanno lo stesso passando
+    # da `build_request_model`. Tutto ciò che resta è colpa nostra.
+
     @app.exception_handler(RequestValidationError)
-    @app.exception_handler(ValidationError)
-    async def validation_exception_handler(request: Request, exc: Exception):
-        raw_errors = exc.errors() if hasattr(exc, "errors") else []
+    async def request_validation_exception_handler(
+            request: Request, exc: RequestValidationError
+    ):
+        """Il client ha mandato dati non validi: `422` con il dettaglio."""
+        raw_errors = list(exc.errors()) if hasattr(exc, "errors") else []
 
         error_message = "I dati inseriti non sono validi."
         if raw_errors:
@@ -108,6 +130,38 @@ def setup_exception_handler(app: FastAPI):
                 "message": error_message,
                 "details": _sanitize_validation_errors(raw_errors)
             },
+        )
+
+    @app.exception_handler(ValidationError)
+    @app.exception_handler(ResponseValidationError)
+    async def server_validation_exception_handler(request: Request, exc: Exception):
+        """
+        Il server ha costruito male un modello: `500`, e il dettaglio nei log.
+
+        Al client va un messaggio generico. Dirgli *quale* campo manca in un
+        nostro schema non lo aiuta — non può farci nulla — e descrive la forma
+        interna dei modelli a chiunque sappia provocare l'errore.
+
+        Nei log finisce il dettaglio **sanificato**, non quello grezzo: la
+        chiave `input` contiene il valore rifiutato, che su una prenotazione è
+        l'email o il telefono di un ospite. Sono gli stessi dati personali che
+        `DB_ECHO=false` tiene fuori dai log, e non ha senso rimetterceli da
+        un'altra porta. Quello che serve a chi diagnostica — *quale campo*, di
+        *quale modello*, su *quale rotta* — resta tutto.
+        """
+        raw_errors = list(exc.errors()) if hasattr(exc, "errors") else []
+
+        logger.error(
+            "Errore di validazione lato server su %s %s: %s",
+            request.method,
+            request.url.path,
+            _sanitize_validation_errors(raw_errors),
+            exc_info=exc,
+        )
+
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"message": "Errore interno del server"},
         )
 
     @app.exception_handler(JSONDecodeError)

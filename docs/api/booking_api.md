@@ -84,6 +84,9 @@ Gli errori di validazione hanno un campo aggiuntivo:
 | `422` | Dati non validi, preventivo scaduto, captcha fallito | Evidenziare il campo tramite `details` |
 | `429` | Troppe richieste | Attendere i secondi indicati in `Retry-After` |
 | `402` | Pagamento richiesto o fallito *(dallo Step G)* | — |
+| `500` | Errore interno, **compreso un modello di risposta costruito male dal server** | Riprovare; il dettaglio è nei log del backend, non nella risposta |
+
+> **Un `422` è sempre colpa del client.** Non era vero fino al 26/09/2026: la stessa `ValidationError` di Pydantic nasce sia quando il client manda dati sbagliati, sia quando il *server* compone male una risposta, ed entrambe uscivano come `422` *"il campo X è obbligatorio"*. Chi riceveva quel messaggio cercava nel proprio payload un campo che non aveva mai inviato. Ora il confine è tracciato dal tipo dell'eccezione: `RequestValidationError` → `422`, qualunque altra `ValidationError` → `500` con il dettaglio nei log. Se il frontend riceve un `422`, il campo indicato è davvero nella richiesta.
 
 ### 1.6 Mappa eccezione → codice
 
@@ -107,6 +110,8 @@ Il backend non espone mai stack trace. Ogni eccezione di dominio deriva da `AppE
 | `RateLimitExceeded` | 429 | Troppe richieste: riprova più tardi |
 | `InvalidFileType` / `InvalidFileSize` | 422 | — |
 | `StaleDataError` *(SQLAlchemy)* | 409 | Il dato è stato modificato da un'altra operazione |
+| `RequestValidationError` *(FastAPI)* | 422 | Dipende dal campo, con `details` |
+| `ValidationError` *(Pydantic, altrove)* · `ResponseValidationError` | **500** | Errore interno del server — dettaglio solo nei log |
 
 ---
 
@@ -229,7 +234,7 @@ Generati con `secrets.token_urlsafe(32)` — 256 bit di entropia. Nel database f
 | `MANAGE` | Gestione della prenotazione |
 | `CANCEL` | Cancellazione |
 
-Sono **monouso**: al primo utilizzo `used_at` viene valorizzato e i tentativi successivi respinti.
+Sono **monouso**: al primo utilizzo `used_at` viene valorizzato e i tentativi successivi respinti. *Utilizzo* significa l'operazione che il token autorizza — confermare, annullare. **Leggere non è utilizzare**: `POST /manage` accetta il token `MANAGE` senza consumarlo, perché la pagina di gestione si ricarica (endpoint 5b).
 
 **Validità.**
 
@@ -322,6 +327,7 @@ Porta a `EXPIRED` le prenotazioni temporanee il cui blocco è scaduto. Parte con
 | 3 | `POST` | `/api/v1/bookings/` | Pubblico | 5/h IP + 3/g email | **sì** |
 | 4 | `POST` | `/api/v1/bookings/confirm` | Pubblico | 10/h IP | no |
 | 5 | `POST` | `/api/v1/bookings/cancel` | Pubblico | 10/h IP | no |
+| **5b** | `POST` | `/api/v1/bookings/manage` | Pubblico | 10/h IP | no |
 | 6 | `POST` | `/api/v1/bookings/lookup` | Pubblico | 10/h IP | no |
 | 7 | `GET` | `/api/v1/bookings/me` | Autenticato | — | no |
 | 8 | `POST` | `/api/v1/bookings/me` | Autenticato | — | no |
@@ -519,6 +525,10 @@ Alla cancellazione lo slot torna **immediatamente** prenotabile, e il token vien
 
 > **Quello che questa tabella non dice, e conviene sapere.** Una disdetta tardiva o una mancata presentazione su `PAY_ON_ARRIVAL` **non costano nulla all'ospite**. Non c'è penale, non c'è carta a garanzia, e l'unico effetto pratico del `409` oltre il termine è che l'ospite non riesce ad annullare da solo: deve telefonare, e finché un admin non interviene lo slot resta occupato. Per la struttura è il caso peggiore — una camera invenduta all'ultimo momento e nessun deterrente. `PricingService.compute_cancellation_penalty` esiste già ma **non è chiamata da nessuna parte**. La soluzione (carta raccolta alla prenotazione con mandato SEPA/SCA, penale addebitata off-session) è tracciata come **debito tecnico #22**: non è una riga da aggiungere qui, richiede un `SetupIntent`, il consenso esplicito dell'ospite e la gestione dell'addebito rifiutato.
 
+> **Prima di chiamare questo endpoint, chiamare il 5b.** La tabella qui sopra il frontend non deve indovinarla: `POST /manage` restituisce `can_cancel` e `blocked_by` calcolati sulla prenotazione reale, in questo istante, dalla stessa funzione che decide qui.
+
+**Verifica della scadenza.** Un token scaduto viene respinto con `400`. Non era vero fino al 26/09/2026: questo endpoint controllava che il token esistesse e non fosse già speso, **ma non la sua scadenza**. Con il `MANAGE` che scade all'arrivo, la finestra non era teorica. Oggi entrambi gli endpoint passano dallo stesso `_load_guest_token`.
+
 **Da dove arriva il token.** È il `MANAGE` emesso alla conferma (endpoint 4) o alla creazione di una prenotazione che nasce già confermata (endpoint 12). Arriva all'ospite nel link *"Gestisci o annulla la prenotazione"* dell'email di riepilogo.
 
 > ⚠️ **Fino allo Step F questo endpoint era irraggiungibile.** Cercava un token `CANCEL` o `MANAGE`, ma nessun percorso di codice ne emetteva uno: la rotta era scritta, testata a livello di servizio e documentata, e nessun client poteva procurarsi la credenziale richiesta. Il difetto è sopravvissuto perché i test del servizio costruivano il token a mano — cosa che un ospite non può fare. Vedi §8bis.11.3.
@@ -526,6 +536,46 @@ Alla cancellazione lo slot torna **immediatamente** prenotabile, e il token vien
 **Email**: `booking_cancelled`.
 
 **Test**: `test_slot_liberato_dopo_la_cancellazione`, `test_il_link_ricevuto_per_email_permette_davvero_di_annullare`, `test_il_link_di_gestione_si_spende_una_volta_sola`, `test_l_annullamento_avvisa_l_ospite`.
+
+---
+
+### 5b · `POST /api/v1/bookings/manage`
+
+**Legge una prenotazione dal link di gestione, senza consumarlo.**
+
+| | |
+|:--|:--|
+| **Accesso** | Pubblico |
+| **Rate limit** | 10/ora per IP (lo stesso di `/lookup`) |
+| **Body** | `BookingManageRequestSchema` — solo `token` |
+| **Risposta** | `BookingManageSchema` |
+
+**Codici**: `200` · `400` token non valido, già speso o scaduto · `422` token di forma errata · `429`
+
+**Perché esiste.** Il link nell'email porta l'ospite su `{frontend}/prenotazione/gestisci?token=...`, cioè sulla SPA **con un token e nient'altro**. Prima di questo endpoint quella pagina non aveva modo di mostrargli la prenotazione: `POST /lookup` chiede codice ed email, che il link non contiene, e `POST /cancel` accetta il token ma annulla. L'unica pagina costruibile era un pulsante *"Annulla"* cieco.
+
+È la stessa forma del difetto dello Step F (§8bis.11.3): una credenziale emessa, recapitata, e senza un endpoint che le permetta di fare ciò per cui l'ospite la riceve.
+
+**Il token non viene speso.** La pagina si ricarica, e un token consumato alla prima lettura lascerebbe l'ospite davanti a un errore al primo aggiornamento — senza più modo di annullare. Resta spendibile finché `POST /cancel` non lo usa davvero.
+
+**Accetta `MANAGE` e `CANCEL`**, come `/cancel`: chi può annullare può a maggior ragione leggere ciò che sta per annullare. Un token `CONFIRM_EMAIL` viene invece respinto.
+
+**Cosa restituisce oltre alla prenotazione.** La politica di cancellazione **applicabile in questo momento**, così la pagina dice all'ospite cosa succederà *prima* che clicchi invece di farglielo scoprire con un `409`:
+
+| Campo | Significato |
+|:--|:--|
+| `can_cancel` | `true` se `POST /cancel` andrebbe a buon fine adesso |
+| `blocked_by` | `STATUS_NOT_CANCELLABLE` · `NON_REFUNDABLE` · `DEADLINE_PASSED` — solo quando `can_cancel` è `false` |
+| `message` | Lo stesso testo che `POST /cancel` restituirebbe nel `409`, già scritto per l'ospite |
+| `free_until` | Termine di cancellazione gratuita, quando esiste |
+
+> **Il frontend usi `blocked_by`, non `message`.** Il codice è stabile e permette di decidere *cosa mostrare* — un avviso, un numero di telefono, un pulsante disabilitato. Il testo è pronto all'uso e allineato a quello del `409`, ma resta una frase in italiano, e una frase non si interroga.
+
+**Non possono divergere.** `can_cancel` e il comportamento di `/cancel` vengono dalla **stessa funzione** — `BookingService.describe_guest_cancellation` — perché due implementazioni, una che decide e una che spiega, si sarebbero separate alla prima modifica della politica commerciale, e in silenzio: la pagina avrebbe annunciato *"annulla gratuitamente"* e l'endpoint avrebbe risposto `409`. C'è un test che percorre la catena da un capo all'altro (`test_la_politica_annunciata_e_quella_applicata`).
+
+**Dopo l'annullamento il token è speso**, quindi anche la lettura si chiude con `400`. È deliberato: la risposta di `POST /cancel` porta già la prenotazione annullata, e la SPA ha tutto per mostrare l'esito senza rileggere.
+
+**Test**: `test_il_link_di_gestione_mostra_la_prenotazione`, `test_la_lettura_non_consuma_il_token`, `test_la_politica_annunciata_e_quella_applicata`, e altri cinque.
 
 ---
 
@@ -859,6 +909,14 @@ curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
 | `quote_token` | string | sì |
 | `accept_terms` | bool | sì (deve essere `true`) |
 
+#### `BookingManageRequestSchema`
+
+| Campo | Tipo | Vincoli |
+|:--|:--|:--|
+| `token` | string | 20–512 caratteri |
+
+Solo il token, senza `reason`: qui non si cancella nulla. Schema separato da `BookingCancelSchema` di proposito — i due endpoint hanno cicli di vita diversi (questo è idempotente, quello consuma il token), e un `reason` accettato su una lettura sarebbe solo un invito a fraintendere.
+
 #### `BookingConfirmSchema` · `BookingCancelSchema` · `OwnBookingCancelSchema` · `BookingLookupSchema`
 
 | Schema | Campi |
@@ -938,6 +996,12 @@ curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
 
 > `unit_price` è il prezzo **congelato** al momento della prenotazione: una modifica successiva al listino non lo altera.
 
+#### `BookingManageSchema` e `GuestCancellationPolicySchema`
+
+`BookingManageSchema` = `booking` (`BookingPublicSchema`) + `cancellation`.
+
+`GuestCancellationPolicySchema`: `can_cancel` (bool) · `blocked_by` (enum o `null`) · `message` (string o `null`) · `free_until` (datetime o `null`).
+
 #### `BookingCreatedSchema`
 
 | Campo | Tipo | Note |
@@ -1009,6 +1073,16 @@ Contenitore: `items[]`, `total`, `page`, `page_size`, `pages`.
 
 Ogni transizione non prevista produce `409`. Ogni transizione eseguita lascia una riga in `booking_status_history` con attore e motivazione.
 
+### `GuestCancellationBlock`
+
+Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /manage`.
+
+| Valore | Significato | Cosa mostrare |
+|:--|:--|:--|
+| `STATUS_NOT_CANCELLABLE` | Già annullata, scaduta, conclusa, o arrivo registrato | Nessun pulsante: non c'è nulla da annullare |
+| `NON_REFUNDABLE` | Pagata online in anticipo | Invito a contattare la struttura |
+| `DEADLINE_PASSED` | Termine di cancellazione gratuita superato | Invito a contattare la struttura |
+
 ### Altri enum
 
 | Enum | Valori |
@@ -1033,11 +1107,12 @@ Ogni transizione non prevista produce `409`. Ogni transizione eseguita lascia un
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
-| `test_booking_api.py` | 26 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email** |
+| `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
+| `test_exception_handler.py` | 4 | no | Errore del client (`422`) contro errore del server (`500`), e cosa non finisce nella risposta |
 | `test_admin_booking_api.py` | 25 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, incassi |
 | `test_email_service.py` | 17 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale |
 | `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
-| **Totale eseguito** | **~169** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
+| **Totale eseguito** | **~181** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
 
 ### Il test che conta più di tutti
 
@@ -1125,6 +1200,14 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Nel dettaglio admin, l'ultima riga di storico ha attore `SYSTEM`
 - [ ] Con `SWEEPER_ENABLED=false` nulla scade da solo, ma l'endpoint 17 funziona
 
+### Pagina di gestione
+
+- [ ] Aprire il link `/prenotazione/gestisci?token=...` ricevuto per email e chiamare `POST /manage` → la prenotazione completa, con `can_cancel: true`
+- [ ] Ripetere la stessa chiamata tre volte → sempre `200`: la lettura non consuma il token
+- [ ] Annullare, poi richiamare `POST /manage` con lo stesso token → `400`
+- [ ] Su una prenotazione `PAY_NOW` confermata → `can_cancel: false`, `blocked_by: "NON_REFUNDABLE"`
+- [ ] Con un token di conferma al posto di quello di gestione → `400`
+
 ### Token
 
 - [ ] Confermare una prenotazione e leggere `expires_at` del token `MANAGE` a database: deve cadere alla **mezzanotte del check-in**, non della partenza
@@ -1198,6 +1281,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 26/09/2026 | **—** | **`POST /bookings/manage`**: il link di gestione ora apre una pagina che mostra la prenotazione e la politica di cancellazione applicabile, senza consumare il token · `POST /cancel` verifica finalmente la **scadenza** del token · `422` e `500` separati per colpevole · `DB_ECHO` spostato in configurazione · rimosso l'`Annotated` di SQLAlchemy in `extra_service_router` |
 | 26/09/2026 | **—** | **Rimossa la `PATCH` di modifica**: ricalcolava il totale senza sapere quanto fosse stato incassato (debito #21) · token `MANAGE` scade al **check-in** invece che alla partenza · pulizia dei token scaduti oltre i 30 giorni, agganciata allo sweeper con cadenza giornaliera · intervallo sweeper 60 → 300 s · politica di cancellazione documentata per esteso |
 | 20/09/2026 | **G** | Pagamenti Stripe a incasso differito (documento a parte: `payment_api.md`) · quinto template email `booking_slot_lost` · lo sweeper rilascia le autorizzazioni prima di liberare gli slot |
 | 20/09/2026 | **F** | `configure_logging()`: i log applicativi avevano un logger ma nessun handler, quindi venivano scartati in silenzio · servizio email con 4 template HTML+testo · sweeper delle scadenze in `lifespan` · `POST /admin/bookings/sweep-expired` · **token `MANAGE` finalmente emesso: `POST /cancel` era irraggiungibile** · invio post-commit con `BackgroundTasks` · `FOR UPDATE SKIP LOCKED` sullo sweeper · nessuna email su `PENDING_PAYMENT` |

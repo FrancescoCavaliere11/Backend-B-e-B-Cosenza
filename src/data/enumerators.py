@@ -123,6 +123,24 @@ class BookingTokenPurpose(str, Enum):
     CANCEL = "CANCEL"
 
 
+class GuestCancellationBlock(str, Enum):
+    """
+    Perché l'ospite non può cancellare da sé.
+
+    Codice, non frase: la pagina di gestione deve poter decidere *cosa
+    mostrare* — un avviso, un numero di telefono, un pulsante disabilitato —
+    e quella decisione non si prende leggendo un testo in italiano.
+    """
+    #: Stato che non ammette cancellazione (già annullata, scaduta, conclusa,
+    #: arrivo registrato).
+    STATUS_NOT_CANCELLABLE = "STATUS_NOT_CANCELLABLE"
+    #: Pagata online in anticipo: l'importo è dovuto, il rimborso lo valuta
+    #: la struttura.
+    NON_REFUNDABLE = "NON_REFUNDABLE"
+    #: Termine di cancellazione gratuita superato.
+    DEADLINE_PASSED = "DEADLINE_PASSED"
+
+
 class AuditActorType(str, Enum):
     """Natura dell'attore che ha determinato una transizione di stato."""
     GUEST = "GUEST"

@@ -35,6 +35,7 @@ from src.data.enumerators import (
     BookingChannel,
     BookingStatus,
     BookingTokenPurpose,
+    GuestCancellationBlock,
     PaymentMethod,
     PaymentOption,
     PaymentStatus,
@@ -53,6 +54,7 @@ from src.data.schemas.booking_schema import (
     AdminPaymentRegistrationSchema,
     BookingExtendHoldSchema,
     BookingListItemSchema,
+    BookingManageSchema,
     BookingPublicSchema,
     BookingQuoteRequestSchema,
     BookingQuoteResponseSchema,
@@ -61,6 +63,7 @@ from src.data.schemas.booking_schema import (
     BookingSearchFiltersSchema,
     BookingStatusHistorySchema,
     BookingStatusUpdateSchema,
+    GuestCancellationPolicySchema,
     GuestBookingCreateSchema,
     PaginatedBookingsSchema,
     UserBookingCreateSchema,
@@ -196,6 +199,27 @@ class PendingPaymentRef:
     booking_id: UUID
     code: str
     payment_intent_id: str
+
+
+@dataclass(frozen=True)
+class GuestCancellationPolicy:
+    """
+    Esito della verifica sulla cancellazione da parte dell'ospite.
+
+    Oggetto di dominio, non DTO: `describe_guest_cancellation` lo restituisce
+    a due chiamanti con esigenze opposte — `_assert_guest_can_cancel`, che lo
+    trasforma in eccezione, e la lettura del link di gestione, che lo
+    trasforma in risposta. Nessuno dei due conosce le regole.
+    """
+
+    can_cancel: bool
+    blocked_by: Optional[GuestCancellationBlock] = None
+    #: Testo già scritto per l'ospite. È lo stesso che finisce nel `409` di
+    #: `POST /cancel`, ed è deliberato: se la pagina di gestione annunciasse
+    #: una cosa e l'endpoint ne dicesse un'altra, la colpa sarebbe di due
+    #: testi scritti in due posti.
+    message: Optional[str] = None
+    free_until: Optional[datetime] = None
 
 
 @dataclass
@@ -688,15 +712,9 @@ class BookingService:
             plain_token: str,
             reason: Optional[str]
     ) -> BookingPublicSchema:
-        token_hash = hash_booking_token(plain_token)
-
-        token = await self.token_repository.get_by_hash(token_hash, BookingTokenPurpose.CANCEL)
-        if token is None:
-            token = await self.token_repository.get_by_hash(
-                token_hash, BookingTokenPurpose.MANAGE
-            )
-        if token is None or token.used_at is not None:
-            raise InvalidBookingToken()
+        token = await self._load_guest_token(
+            plain_token, (BookingTokenPurpose.CANCEL, BookingTokenPurpose.MANAGE)
+        )
 
         booking = await self.booking_repository.get_by_id(token.booking_id, with_items=True)
         if booking is None:
@@ -1353,6 +1371,90 @@ class BookingService:
 
         return await self._to_admin_schema(booking)
 
+    async def _load_guest_token(
+            self,
+            plain_token: str,
+            purposes: Sequence[BookingTokenPurpose]
+    ) -> BookingToken:
+        """
+        Carica un token dell'ospite e ne verifica la spendibilità.
+
+        Unico punto in cui è scritto che cosa rende valido un token di
+        gestione: esiste, ha uno degli scopi attesi, non è stato speso, non è
+        scaduto. Prima che questo helper esistesse `POST /cancel` controllava
+        i primi tre e **non la scadenza**, il che rendeva cancellabile una
+        prenotazione con un link ormai morto — e una `MANAGE` scade
+        all'arrivo, quindi la finestra non era teorica.
+
+        L'ordine degli scopi conta solo per il numero di query: il primo che
+        corrisponde vince, e il risultato è lo stesso.
+
+        :raises InvalidBookingToken: in tutti i casi, con lo stesso messaggio.
+            Distinguere "scaduto" da "inesistente" direbbe a chi prova token
+            a caso quali abbia senso continuare a provare.
+        """
+        token_hash = hash_booking_token(plain_token)
+
+        token = None
+        for purpose in purposes:
+            token = await self.token_repository.get_by_hash(token_hash, purpose)
+            if token is not None:
+                break
+
+        if token is None or token.used_at is not None:
+            raise InvalidBookingToken()
+
+        if token.expires_at is not None and token.expires_at <= datetime.now(timezone.utc):
+            raise InvalidBookingToken()
+
+        return token
+
+    async def read_by_manage_token(self, plain_token: str) -> BookingManageSchema:
+        """
+        Legge una prenotazione a partire dal token del link di gestione.
+
+        **Non consuma il token.** È una lettura, e la pagina che la usa viene
+        ricaricata: un token speso al primo caricamento renderebbe il link
+        monouso nel senso sbagliato — l'ospite lo aprirebbe, leggerebbe, e al
+        primo aggiornamento della pagina non avrebbe più niente.
+
+        Esiste perché senza di essa il link di gestione non porta da nessuna
+        parte. `POST /lookup` chiede codice ed email, che il link non
+        contiene; `POST /cancel` accetta il token ma annulla. La pagina
+        poteva quindi offrire solo un pulsante "Annulla" cieco, senza dire
+        all'ospite che cosa stesse annullando. È la stessa forma del difetto
+        dello Step F, dove `POST /cancel` richiedeva una credenziale che
+        nessun percorso emetteva: una credenziale e il suo utilizzo che non si
+        incontrano.
+
+        Accetta `MANAGE` e `CANCEL`, come `POST /cancel`: chi possiede un
+        token che consente di annullare può a maggior ragione leggere ciò che
+        sta per annullare.
+
+        :raises InvalidBookingToken: token inesistente, di scopo diverso, già
+            speso o scaduto. Risposta identica in tutti i casi: distinguerli
+            direbbe a chi prova token a caso quali esistono.
+        """
+        token = await self._load_guest_token(
+            plain_token, (BookingTokenPurpose.MANAGE, BookingTokenPurpose.CANCEL)
+        )
+
+        booking = await self.booking_repository.get_by_id(token.booking_id, with_items=True)
+        if booking is None:
+            raise InvalidBookingToken()
+
+        policy = self.describe_guest_cancellation(booking)
+
+        return BookingManageSchema(
+            booking=self._to_public_schema(booking),
+            cancellation=GuestCancellationPolicySchema(
+                can_cancel=policy.can_cancel,
+                blocked_by=policy.blocked_by,
+                message=policy.message,
+                free_until=policy.free_until,
+            ),
+        )
+
     async def lookup(self, code: str, email: str) -> BookingPublicSchema:
         """Consultazione da parte di un ospite non registrato (codice + email)."""
         booking = await self.booking_repository.get_by_code_and_email(code, email)
@@ -1458,35 +1560,74 @@ class BookingService:
         for item in booking.items:
             item.is_active = occupying
 
-    def _assert_guest_can_cancel(self, booking: Booking) -> None:
+    @staticmethod
+    def describe_guest_cancellation(booking: Booking) -> GuestCancellationPolicy:
         """
-        Verifica che l'ospite possa cancellare da sé.
+        Dice se l'ospite può cancellare da sé, e se no perché.
 
-        Una prenotazione già pagata online non è auto-cancellabile: l'importo
-        è dovuto e l'eventuale rimborso passa da una valutazione della
-        struttura. L'ospite viene indirizzato al contatto diretto invece di
-        ricevere un rifiuto muto.
+        **È l'unico posto in cui questa regola è scritta.** `POST /cancel` la
+        usa per decidere, `POST /manage` per raccontarla all'ospite prima che
+        clicchi. Due implementazioni — una che decide e una che spiega —
+        divergerebbero alla prima modifica della politica commerciale, e
+        divergerebbero in modo invisibile: la pagina direbbe "annulla
+        gratuitamente" e l'endpoint risponderebbe `409`.
+
+        Le tre condizioni, nell'ordine in cui vanno valutate:
+
+        1. una prenotazione ancora in attesa si annulla sempre — non c'è nulla
+           da disdire, solo un blocco da liberare;
+        2. una già pagata online non è auto-cancellabile: l'importo è dovuto e
+           l'eventuale rimborso lo valuta la struttura;
+        3. oltre il termine di cancellazione gratuita serve un intervento
+           umano.
+
+        Fuori dallo stato `CONFIRMED` e da quelli in attesa non resta nulla da
+        annullare: annullata, scaduta, conclusa, arrivo registrato.
         """
         if booking.status in PENDING_BOOKING_STATUSES:
-            return
+            return GuestCancellationPolicy(can_cancel=True)
 
         if booking.status != BookingStatus.CONFIRMED:
-            raise BookingNotCancellable(
-                "La prenotazione non si trova in uno stato che consente la cancellazione"
+            return GuestCancellationPolicy(
+                can_cancel=False,
+                blocked_by=GuestCancellationBlock.STATUS_NOT_CANCELLABLE,
+                message="La prenotazione non si trova in uno stato che consente la cancellazione",
             )
 
         if booking.payment_option == PaymentOption.PAY_NOW:
-            raise BookingNotCancellable(
-                "Le prenotazioni con pagamento online anticipato non sono rimborsabili. "
-                "Contatta la struttura per valutare la tua situazione."
+            return GuestCancellationPolicy(
+                can_cancel=False,
+                blocked_by=GuestCancellationBlock.NON_REFUNDABLE,
+                message=(
+                    "Le prenotazioni con pagamento online anticipato non sono rimborsabili. "
+                    "Contatta la struttura per valutare la tua situazione."
+                ),
             )
 
         deadline = booking.cancellation_deadline
         if deadline is not None and datetime.now(timezone.utc) > deadline:
-            raise BookingNotCancellable(
-                "Il termine per la cancellazione gratuita è scaduto. "
-                "Contatta la struttura per assistenza."
+            return GuestCancellationPolicy(
+                can_cancel=False,
+                blocked_by=GuestCancellationBlock.DEADLINE_PASSED,
+                message=(
+                    "Il termine per la cancellazione gratuita è scaduto. "
+                    "Contatta la struttura per assistenza."
+                ),
+                free_until=deadline,
             )
+
+        return GuestCancellationPolicy(can_cancel=True, free_until=deadline)
+
+    def _assert_guest_can_cancel(self, booking: Booking) -> None:
+        """
+        Interrompe la cancellazione quando la politica non la consente.
+
+        Nessuna regola qui: solo la traduzione in eccezione di ciò che
+        `describe_guest_cancellation` ha già deciso.
+        """
+        policy = self.describe_guest_cancellation(booking)
+        if not policy.can_cancel:
+            raise BookingNotCancellable(policy.message)
 
     @staticmethod
     def _assert_status_change_is_coherent(booking: Booking, new_status: BookingStatus) -> None:

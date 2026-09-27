@@ -41,6 +41,8 @@ from src.data.schemas.booking_schema import (
     BookingConfirmSchema,
     BookingCreatedSchema,
     BookingLookupSchema,
+    BookingManageRequestSchema,
+    BookingManageSchema,
     BookingPublicSchema,
     BookingQuoteRequestSchema,
     BookingQuoteResponseSchema,
@@ -48,6 +50,7 @@ from src.data.schemas.booking_schema import (
     OwnBookingCancelSchema,
     UserBookingCreateSchema,
 )
+from src.routers.dependencies import build_request_model
 from src.security.authentication import get_current_user
 from src.security.captcha import verify_captcha
 from src.security.rate_limiter import (
@@ -103,9 +106,16 @@ def get_availability_request(
     Costruire il modello qui fa sì che le regole di soggiorno (notti minime e
     massime, anticipo, date nel passato) valgano anche per una `GET`, con lo
     stesso messaggio d'errore degli endpoint `POST`.
+
+    Passa da `build_request_model` perché questi sono dati del **client**: un
+    errore qui deve restare un `422`, non finire nel ramo che l'handler
+    globale riserva agli errori del server.
     """
-    return AvailabilityRequestSchema(
-        check_in=check_in, check_out=check_out, guest_count=guest_count
+    return build_request_model(
+        AvailabilityRequestSchema,
+        check_in=check_in,
+        check_out=check_out,
+        guest_count=guest_count,
     )
 
 
@@ -261,6 +271,41 @@ async def confirm_booking(
         result.manage_token,
     )
     return result.booking
+
+
+@booking_router.post(
+    "/manage",
+    response_model=BookingManageSchema,
+    dependencies=[Depends(booking_lookup_rate_limit)],
+    summary="Legge una prenotazione dal link di gestione ricevuto per email",
+)
+async def read_managed_booking(
+        payload: BookingManageRequestSchema,
+        service: Annotated[BookingService, Depends(get_booking_service)],
+) -> BookingManageSchema:
+    """
+    È la prima chiamata della pagina *"Gestisci la tua prenotazione"*.
+
+    Il link nell'email porta l'ospite sulla SPA con **solo un token**: non ha
+    il codice né l'email, quindi `POST /lookup` non è utilizzabile, e
+    `POST /cancel` annullerebbe invece di mostrare. Senza questo endpoint
+    l'unica pagina costruibile sarebbe un pulsante "Annulla" cieco.
+
+    **Il token non viene speso.** La pagina si ricarica, e un token consumato
+    alla prima lettura lascerebbe l'ospite davanti a un errore al primo
+    aggiornamento.
+
+    Oltre alla prenotazione restituisce la **politica di cancellazione
+    applicabile adesso**: `can_cancel`, il motivo dell'eventuale blocco in
+    forma di codice (`blocked_by`), il testo già scritto per l'ospite e il
+    termine di gratuità. Viene dalla stessa funzione che `POST /cancel` usa
+    per decidere, quindi ciò che la pagina annuncia e ciò che l'endpoint farà
+    non possono divergere.
+
+    Stesso limite di frequenza di `/lookup`: è la stessa operazione — leggere
+    una prenotazione senza essere autenticati — con una credenziale diversa.
+    """
+    return await service.read_by_manage_token(payload.token)
 
 
 @booking_router.post(

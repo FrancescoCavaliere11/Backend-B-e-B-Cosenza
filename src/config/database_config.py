@@ -13,8 +13,9 @@ class Base(DeclarativeBase):
 
 engine = create_async_engine(
     DATABASE_URL,
-    # 'echo=True' è utile in sviluppo per vedere le query SQL generate nei log.
-    echo=True,
+    # Attivabile da .env con DB_ECHO=true, e solo in sviluppo: l'eco registra
+    # anche i *parametri* delle query, cioè i dati personali degli ospiti.
+    echo=s.db_echo,
     future=True,
     # Ottimizzazione: pool_pre_ping aiuta a recuperare connessioni interrotte
     pool_pre_ping=True

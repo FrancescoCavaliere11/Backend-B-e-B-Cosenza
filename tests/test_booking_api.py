@@ -589,3 +589,154 @@ async def test_la_prenotazione_di_un_utente_autenticato_avvisa_il_suo_indirizzo(
 
     assert response.status_code == 201, response.text
     assert email_backend.sent_to(regular_user.email)
+
+
+# ===========================================================================
+# La pagina di gestione: POST /manage
+# ===========================================================================
+#
+# Il link dell'email porta l'ospite sulla SPA con **solo un token**. Senza
+# questi endpoint la pagina potrebbe offrirgli un pulsante "Annulla" e nulla
+# più: non il soggiorno, non il prezzo, non se annullare gli costerà qualcosa.
+
+
+async def _prenota_e_conferma(api_client, room_id, email_backend) -> str:
+    """Percorso completo fino alla conferma; restituisce il token di gestione."""
+    quote = await _get_quote(api_client, room_id)
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+    assert creata.status_code == 201, creata.text
+
+    conferma = await api_client.post(
+        f"{BASE}/confirm", json={"token": creata.json()["confirmation_token"]}
+    )
+    assert conferma.status_code == 200, conferma.text
+
+    return _estrai_token(email_backend.last.text_body, "/prenotazione/gestisci")
+
+
+async def test_il_link_di_gestione_mostra_la_prenotazione(
+        api_client, rooms, email_backend
+):
+    """
+    Il test che chiude il difetto scoperto pianificando il frontend.
+
+    Stessa forma di quello dello Step F: una credenziale emessa e recapitata,
+    e nessun modo di usarla per lo scopo per cui l'ospite la riceve. Il token
+    qui viene estratto dall'email, come farebbe lui.
+    """
+    token = await _prenota_e_conferma(api_client, rooms[0].id, email_backend)
+
+    response = await api_client.post(f"{BASE}/manage", json={"token": token})
+
+    assert response.status_code == 200, response.text
+    corpo = response.json()
+
+    # C'è abbastanza da riempire la pagina.
+    assert corpo["booking"]["status"] == "CONFIRMED"
+    assert corpo["booking"]["check_in"] == CHECK_IN.isoformat()
+    assert corpo["booking"]["total_price"]
+    assert corpo["booking"]["rooms"]
+
+    # E non c'è niente che l'ospite non debba vedere.
+    assert "id" not in corpo["booking"]
+    assert "admin_notes" not in corpo["booking"]
+    assert "version" not in corpo["booking"]
+
+
+async def test_la_lettura_non_consuma_il_token(api_client, rooms, email_backend):
+    """
+    La pagina si ricarica. Un token speso alla prima lettura lascerebbe
+    l'ospite davanti a un errore al primo aggiornamento — e senza più modo di
+    annullare.
+    """
+    token = await _prenota_e_conferma(api_client, rooms[0].id, email_backend)
+
+    for _ in range(3):
+        assert (await api_client.post(f"{BASE}/manage", json={"token": token})).status_code == 200
+
+    # E dopo tre letture il token annulla ancora.
+    annulla = await api_client.post(f"{BASE}/cancel", json={"token": token})
+    assert annulla.status_code == 200, annulla.text
+    assert annulla.json()["status"] == "CANCELLED"
+
+
+async def test_dice_che_la_cancellazione_e_possibile(api_client, rooms, email_backend):
+    token = await _prenota_e_conferma(api_client, rooms[0].id, email_backend)
+
+    politica = (
+        await api_client.post(f"{BASE}/manage", json={"token": token})
+    ).json()["cancellation"]
+
+    assert politica["can_cancel"] is True
+    assert politica["blocked_by"] is None
+
+
+async def test_la_politica_annunciata_e_quella_applicata(
+        api_client, rooms, email_backend
+):
+    """
+    Il test che conta di più su questo endpoint.
+
+    La pagina promette all'ospite un esito; l'endpoint di cancellazione lo
+    mantiene. Le due risposte vengono dalla stessa funzione proprio perché
+    non possano divergere, e questo verifica che la catena regga da un capo
+    all'altro invece di fidarsi della struttura del codice.
+    """
+    token = await _prenota_e_conferma(api_client, rooms[0].id, email_backend)
+
+    annunciato = (
+        await api_client.post(f"{BASE}/manage", json={"token": token})
+    ).json()["cancellation"]
+
+    esito = await api_client.post(f"{BASE}/cancel", json={"token": token})
+
+    assert annunciato["can_cancel"] is (esito.status_code == 200)
+
+
+async def test_dopo_l_annullamento_il_token_non_legge_piu(
+        api_client, rooms, email_backend
+):
+    """
+    Il token viene speso dalla cancellazione, quindi anche la lettura si
+    chiude. È deliberato: la risposta a `POST /cancel` porta già la
+    prenotazione annullata, e la SPA ha ciò che le serve per mostrare l'esito
+    senza rileggere.
+    """
+    token = await _prenota_e_conferma(api_client, rooms[0].id, email_backend)
+    assert (await api_client.post(f"{BASE}/cancel", json={"token": token})).status_code == 200
+
+    response = await api_client.post(f"{BASE}/manage", json={"token": token})
+    assert response.status_code in (400, 410)
+
+
+async def test_un_token_inventato_viene_respinto(api_client):
+    response = await api_client.post(f"{BASE}/manage", json={"token": "x" * 43})
+    assert response.status_code in (400, 410)
+
+
+async def test_un_token_troppo_corto_e_un_errore_di_validazione(api_client):
+    """`422` e non `400`: qui è la forma del dato a essere sbagliata."""
+    response = await api_client.post(f"{BASE}/manage", json={"token": "corto"})
+    assert response.status_code == 422
+
+
+async def test_il_token_di_conferma_non_apre_la_pagina_di_gestione(
+        api_client, rooms, email_backend
+):
+    """
+    Gli scopi non sono intercambiabili: un token di conferma vale solo per
+    confermare, altrimenti distinguerli non servirebbe a nulla.
+    """
+    quote = await _get_quote(api_client, rooms[0].id)
+    creata = await api_client.post(
+        f"{BASE}/",
+        json={"quote_token": quote["quote_token"], "guest": GUEST, "accept_terms": True},
+    )
+
+    response = await api_client.post(
+        f"{BASE}/manage", json={"token": creata.json()["confirmation_token"]}
+    )
+    assert response.status_code in (400, 410)

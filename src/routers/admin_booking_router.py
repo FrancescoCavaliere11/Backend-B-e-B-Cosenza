@@ -40,6 +40,7 @@ from src.data.schemas.booking_schema import (
     SweepResultSchema,
 )
 from src.routers.booking_router import schedule_creation_email, get_booking_service
+from src.routers.dependencies import build_request_model
 from src.security.authorization import is_admin_user
 from src.service.booking_expiration_service import dispatch_expiration_notices
 from src.service.booking_service import BookingService
@@ -70,8 +71,13 @@ def get_search_filters(
     Costruire il modello qui fa sì che le validazioni — intervallo coerente,
     email ben formata, dimensione di pagina entro il limite — valgano anche su
     una `GET`, con gli stessi messaggi d'errore degli endpoint `POST`.
+
+    Passa da `build_request_model` perché questi sono dati del **client**: un
+    errore qui deve restare un `422`, non finire nel ramo che l'handler
+    globale riserva agli errori del server.
     """
-    return BookingSearchFiltersSchema(
+    return build_request_model(
+        BookingSearchFiltersSchema,
         status=status,
         date_from=date_from,
         date_to=date_to,
