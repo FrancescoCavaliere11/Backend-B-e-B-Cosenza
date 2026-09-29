@@ -238,14 +238,19 @@ sempre. Le eccezioni risalgono all'handler globale, che risponde `5xx`.
 
 **Esiti possibili** (campo `outcome`): `CONFIRMED` · `ALREADY_CONFIRMED` ·
 `SLOT_LOST` · `AMOUNT_MISMATCH` · `PAYMENT_FAILED` · `REFUNDED` · `CANCELED` ·
-`DUPLICATE` · `IGNORED` · `UNKNOWN_BOOKING`
+`DUPLICATE` · `IGNORED` · `UNKNOWN_BOOKING` · `NOT_PAYABLE`
+
+**`NOT_PAYABLE`** *(dal 28/09/2026)*. La prenotazione non attende più un pagamento — tipicamente annullata dal back-office mentre l'ospite era sulla pagina di pagamento. L'autorizzazione viene **rilasciata**, le righe camera **non** vengono riattivate, nessun incasso. Prima della correzione la verifica controllava solo `== CONFIRMED`: una prenotazione annullata passava, si riprendeva lo slot e veniva incassata, per poi fallire sulla transizione `CANCELLED → CONFIRMED`. Denaro preso, nessuna camera, nessuna email.
+
+> Resta una finestra di pochi millisecondi: un annullamento che arriva **fra** la verifica e l'incasso non viene intercettato. Chiuderla richiede un rimborso automatico sulla transizione, che appartiene al debito #21.
 
 **Test**: `test_ciclo_completo_dal_pagamento_alla_conferma`,
 `test_lo_slot_perduto_non_produce_addebito`,
 `test_lo_stesso_evento_due_volte_ha_un_solo_effetto`,
 `test_una_firma_non_valida_non_produce_effetti`,
 `test_un_importo_diverso_dal_dovuto_non_viene_incassato`,
-`test_un_pagamento_rifiutato_resta_ritentabile`, e altri sei.
+`test_un_pagamento_rifiutato_resta_ritentabile`,
+`test_una_prenotazione_annullata_durante_il_pagamento_non_viene_incassata`, e altri sei.
 
 ---
 
@@ -375,7 +380,7 @@ pagamento di una prenotazione altrui.
 | File | Test | DB | Cosa verifica |
 |:--|:--:|:--:|:--|
 | `test_payment_service.py` | 17 | no | Conversione importi, macchina a stati del gateway, firma |
-| `test_payment_api.py` | 16 | sì | Ciclo completo, slot perduto, idempotenza, firma, importo |
+| `test_payment_api.py` | 19 | sì | Ciclo completo, slot perduto, **prenotazione annullata durante il pagamento**, idempotenza, firma, importo |
 
 ### Il test che conta più di tutti
 
@@ -416,12 +421,19 @@ localhost:8000/api/v1/payments/webhook`.
 - [ ] **Nel cruscotto Stripe l'autorizzazione risulta rilasciata, non incassata e non rimborsata**
 - [ ] L'ospite riceve l'email che dice che non è stato addebitato nulla
 
+### Annullata durante il pagamento
+- [ ] Avviare il pagamento (`/intent`), **senza completarlo**
+- [ ] Dal back-office annullare la prenotazione (`POST /admin/bookings/{id}/status`, `CANCELLED`)
+- [ ] Completare il pagamento con `4242 4242 4242 4242` → esito `NOT_PAYABLE`
+- [ ] **Nel cruscotto Stripe l'autorizzazione risulta rilasciata, non incassata**; la prenotazione resta `CANCELLED` e lo slot libero
+
 ---
 
 ## 10. Changelog
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 28/09/2026 | **—** | **Nuovo esito `NOT_PAYABLE`**: un'autorizzazione su una prenotazione che non attende più il pagamento (annullata dal back-office durante il checkout) viene rilasciata invece di essere incassata |
 | 26/09/2026 | **—** | Intervallo dello sweeper 60 → 300 s · §6 spiega a cosa serve davvero il rilascio delle autorizzazioni (rendere non pagabile un checkout abbandonato, non sbloccare denaro) |
 | 20/09/2026 | **G** | Payment Intent a incasso differito · webhook firmato e idempotente · verifica dell'importo e dello slot prima dell'incasso · rilascio dell'autorizzazione se lo slot è perduto · sweeper che annulla le autorizzazioni prima di liberare · email `booking_slot_lost` |
 

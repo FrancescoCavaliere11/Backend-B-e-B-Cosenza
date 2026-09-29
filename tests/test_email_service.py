@@ -17,7 +17,7 @@ from src.config.config import settings
 from src.data.enumerators import BookingStatus, PaymentOption, PaymentStatus
 from src.data.schemas.booking_schema import BookingPublicSchema, BookingRoomItemSchema
 from src.service.email.backend import FailingEmailBackend, MemoryEmailBackend, mask_recipient
-from src.service.email.email_service import EmailService, format_money
+from src.service.email.email_service import EmailService, format_deadline, format_money
 
 # `asyncio_mode = auto` in pytest.ini: ogni `async def test_` viene eseguito
 # senza marcatura esplicita.
@@ -214,6 +214,135 @@ async def test_la_scadenza_e_mostrata_in_ora_locale(service, backend):
 
     # Europe/Rome a luglio è UTC+2.
     assert "15/07/2026 alle 14:00" in backend.last.text_body
+
+
+async def test_il_termine_a_mezzanotte_e_scritto_come_fine_del_giorno_prima(service, backend):
+    """
+    Il termine di cancellazione gratuita cade alla mezzanotte locale. «Fino
+    al 14/11 alle 00:00» viene letto da molti come «entro la fine del 14»:
+    un giorno di troppo. Si scrive l'ultimo minuto utile.
+    """
+    booking = build_booking(
+        status=BookingStatus.CONFIRMED,
+        # Mezzanotte a Roma a novembre (UTC+1) = 23:00 UTC del giorno prima.
+        cancellation_deadline=datetime(2026, 11, 13, 23, 0, tzinfo=timezone.utc),
+    )
+
+    await service.send_booking_confirmed(booking, "token")
+
+    corpo = backend.last.text_body
+    assert "entro le 23:59 del 13/11/2026" in corpo
+    assert "00:00" not in corpo
+    assert "entro le 23:59 del 13/11/2026" in backend.last.html_body
+
+
+def test_un_termine_non_a_mezzanotte_resta_con_il_suo_orario():
+    # Luglio: Europe/Rome è UTC+2.
+    termine = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+    assert format_deadline(termine) == "entro il 15/07/2026 alle 14:00"
+
+
+async def test_l_attesa_di_conferma_scrive_fino_al_e_non_fino_alle(service, backend):
+    await service.send_booking_pending(build_booking(), "token")
+
+    assert "fino al 01/11/2026 alle 11:00" in backend.last.text_body
+    assert "fino alle" not in backend.last.text_body
+    assert "fino alle" not in backend.last.html_body
+
+
+# --------------------------------------------------------------------------- #
+# Testi coerenti con le regole (28/09/2026)                                    #
+# --------------------------------------------------------------------------- #
+
+async def test_la_conferma_non_promette_modifiche_ne_annullamenti_non_consentiti(service, backend):
+    """
+    Pagamento anticipato: l'ospite non può annullare, e la modifica non
+    esiste per nessuno. Il messaggio diceva «Gestisci o annulla» e «modificare
+    o annullare il soggiorno».
+    """
+    booking = build_booking(
+        status=BookingStatus.CONFIRMED,
+        payment_option=PaymentOption.PAY_NOW,
+        payment_status=PaymentStatus.PAID,
+    )
+
+    await service.send_booking_confirmed(booking, "token")
+
+    for corpo in (backend.last.text_body, backend.last.html_body):
+        assert "modificare" not in corpo
+        assert "annull" not in corpo.lower()
+        assert "non è rimborsabile" in corpo
+        assert "Gestisci la prenotazione" in corpo
+
+
+async def test_la_conferma_con_termine_gratuito_spiega_che_si_puo_annullare(service, backend):
+    booking = build_booking(
+        status=BookingStatus.CONFIRMED,
+        cancellation_deadline=datetime(2026, 11, 7, 23, 0, tzinfo=timezone.utc),
+    )
+
+    await service.send_booking_confirmed(booking, "token")
+
+    corpo = backend.last.text_body
+    assert "annullarla gratuitamente entro il termine indicato" in corpo
+    assert "non è rimborsabile" not in corpo
+
+
+async def test_pagata_al_banco_risulta_saldata_anche_se_in_struttura(service, backend):
+    """
+    Una prenotazione `PAY_ON_ARRIVAL` incassata alla creazione dal back-office
+    diceva «il pagamento avviene in struttura»: il testo dipendeva
+    dall'opzione, non dall'incasso.
+    """
+    booking = build_booking(
+        status=BookingStatus.CONFIRMED,
+        payment_option=PaymentOption.PAY_ON_ARRIVAL,
+        payment_status=PaymentStatus.PAID,
+    )
+
+    await service.send_booking_confirmed(booking, "token")
+
+    assert "già saldato" in backend.last.text_body
+    assert "avviene in struttura" not in backend.last.text_body
+
+
+async def test_l_annullamento_della_struttura_non_sembra_un_allarme(service, backend):
+    """
+    «Non sei stato tu ad annullare?» ha senso quando annulla l'ospite con il
+    suo link. Quando annulla il banco, suona come un avviso di sicurezza.
+    La motivazione interna dell'admin non viene mai mostrata.
+    """
+    booking = build_booking(status=BookingStatus.CANCELLED)
+
+    await service.send_booking_cancelled(booking, by_structure=True)
+
+    for corpo in (backend.last.text_body, backend.last.html_body):
+        assert "Non sei stato tu" not in corpo
+        assert "registrato dalla struttura" in corpo
+        assert "ti spiegheremo il motivo" in corpo
+
+
+async def test_l_annullamento_dell_ospite_conserva_la_domanda_di_controllo(service, backend):
+    await service.send_booking_cancelled(build_booking(status=BookingStatus.CANCELLED))
+
+    assert "Non sei stato tu ad annullare?" in backend.last.text_body
+    assert "registrato dalla struttura" not in backend.last.text_body
+
+
+@pytest.mark.parametrize(
+    "stato, menzionato",
+    [(PaymentStatus.PAID, True), (PaymentStatus.PENDING, False)],
+)
+async def test_l_importo_gia_pagato_si_menziona_solo_se_pagato(service, backend, stato, menzionato):
+    booking = build_booking(
+        status=BookingStatus.CANCELLED,
+        payment_option=PaymentOption.PAY_ON_ARRIVAL,
+        payment_status=stato,
+    )
+
+    await service.send_booking_cancelled(booking, by_structure=True)
+
+    assert ("importo già pagato" in backend.last.text_body) is menzionato
 
 
 # --------------------------------------------------------------------------- #

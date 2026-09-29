@@ -107,6 +107,7 @@ Il backend non espone mai stack trace. Ogni eccezione di dominio deriva da `AppE
 | `InvalidQuoteToken` | 422 | Il preventivo non è più valido |
 | `CaptchaValidationFailed` | 422 | Verifica anti-bot non superata |
 | `ConcurrentModification` | 409 | La prenotazione è stata modificata da un altro operatore |
+| `InvalidPaymentOperation` | 409 | L'operazione non è compatibile con lo stato del pagamento |
 | `RateLimitExceeded` | 429 | Troppe richieste: riprova più tardi |
 | `InvalidFileType` / `InvalidFileSize` | 422 | — |
 | `StaleDataError` *(SQLAlchemy)* | 409 | Il dato è stato modificato da un'altra operazione |
@@ -267,14 +268,22 @@ Correzione importante introdotta allo Step B: gli errori di validazione producev
 
 ### 3.8 Email transazionali
 
-Quattro messaggi, ciascuno in versione HTML e testo semplice.
+Cinque messaggi, ciascuno in versione HTML e testo semplice.
 
 | Template | Quando parte | Cosa contiene |
 |:--|:--|:--|
 | `booking_pending` | Creazione con conferma richiesta | Link di conferma, scadenza del blocco |
-| `booking_confirmed` | Conferma, o creazione già confermata | Riepilogo, **link di gestione**, termine gratuito |
-| `booking_cancelled` | Annullamento, dall'ospite o dal back-office | Riepilogo, eventuale penale |
+| `booking_confirmed` | Conferma, o creazione già confermata | Riepilogo, **link di gestione**, termine gratuito, avviso di non rimborsabilità per `PAY_NOW` |
+| `booking_cancelled` | Annullamento, dall'ospite o dal back-office | Riepilogo, importo già pagato se `PAID`, chiusura diversa se ha annullato la struttura |
 | `booking_expired` | Sweeper | Avviso, invito a riprenotare |
+
+**Il testo segue le regole, non le opzioni** *(dal 28/09/2026)*:
+
+- «già saldato» e «importo già pagato» dipendono da `payment_status == PAID`, non da `payment_option`: una `PAY_ON_ARRIVAL` incassata al banco è saldata come una pagata online;
+- il link di gestione si presenta come «Gestisci la prenotazione» e promette l'annullamento **solo** se esiste un termine di cancellazione gratuita. La modifica non viene mai menzionata: non esiste per l'ospite;
+- `PAY_NOW` riceve la riga «La tariffa con pagamento anticipato non è rimborsabile»;
+- un termine alla mezzanotte locale si scrive «entro le 23:59 del *giorno prima*» (filtro `scadenza`): «fino al 14/11 alle 00:00» veniva letto come un giorno in più. Il termine calcolato non cambia;
+- l'annullamento disposto dal back-office (`by_structure=True`) dice «L'annullamento è stato registrato dalla struttura» invece di «Non sei stato tu ad annullare?». La motivazione inserita dall'admin non viene mai mostrata all'ospite.
 
 **I link puntano alla SPA, non al backend**: `{FRONTEND_BASE_URL}/prenotazione/conferma?token=...` e `/prenotazione/gestisci?token=...`. Il frontend legge il token dalla query string e lo inoltra nel **body di una POST** al backend. Il token non deve mai comparire in un URL del backend, dove finirebbe negli access log e nell'header `Referer`.
 
@@ -742,11 +751,21 @@ Non serve un preventivo firmato: l'admin è un attore fidato e il prezzo è calc
 
 Sono consentite **date nel passato**, per registrare a posteriori un walk-in o correggere un errore.
 
+**Coerenza del pagamento** *(dal 28/09/2026)*. Una prenotazione nata dal back-office non passa mai da Stripe: ciò che non si incassa qui non verrà incassato altrove. Le combinazioni che la lascerebbero impossibile da completare rispondono `422`:
+
+| Richiesta | Perché è rifiutata |
+|:--|:--|
+| `payment_method = STRIPE_CARD` | Un pagamento online lo registra solo il webhook |
+| `payment_method` senza `mark_as_paid` | Il campo descrive come l'ospite **ha già pagato**, non come pagherà |
+| `mark_as_paid` senza `payment_method` | Un incasso ha sempre un mezzo |
+| `mark_as_paid` con `skip_email_confirmation = false` | Se la conferma non arrivasse, l'incasso resterebbe su una prenotazione `EXPIRED` |
+| `payment_option = PAY_NOW` senza `mark_as_paid` | Nata `CONFIRMED`, non potrebbe più essere pagata online (`POST /payments/intent` la rifiuta come già confermata): resterebbe scontata del 10% e mai saldata |
+
 > ⚠️ **Frontend**: quando la data di arrivo è precedente a oggi, mostrare un dialog di conferma esplicito prima di inviare. Il backend lo consente di proposito, quindi l'unica difesa contro il refuso di digitazione è quell'avviso.
 
 **Email**: `booking_confirmed` con il link di gestione quando nasce già confermata, `booking_pending` quando `skip_email_confirmation` è disattivato. Una prenotazione presa al telefono resta una prenotazione di cui l'ospite deve avere traccia scritta.
 
-**Test**: l'intera classe `TestCreate` (7 test).
+**Test**: l'intera classe `TestCreate` (7 test); le combinazioni di pagamento in `test_booking_schema.py::TestAdminBookingCreate`.
 
 ---
 
@@ -790,11 +809,18 @@ Il difetto non era nella rotta ma nel modello, che confonde il dovuto con l'inca
 | → `NO_SHOW` | non prima che l'ospite fosse atteso |
 | → `COMPLETED` | non prima della data di partenza |
 
-L'annullamento libera **immediatamente** lo slot.
+Due transizioni che la macchina a stati ammette sono **negate all'admin** *(dal 28/09/2026)*, perché appartengono a un altro attore:
+
+| Transizione | Risposta | Perché |
+|:--|:--|:--|
+| → `EXPIRED` | `409` *«La scadenza è gestita automaticamente dal sistema»* | È dello sweeper (piano del modulo, §4.1). Per liberare subito uno slot, l'admin annulla |
+| `PENDING_PAYMENT` → `CONFIRMED` | `409` *«Questa prenotazione si conferma solo con il pagamento online»* | È del webhook. Confermata a mano resterebbe scontata e mai pagata |
+
+L'annullamento libera **immediatamente** lo slot. Annullare una prenotazione `PENDING_PAYMENT` è sicuro anche se l'ospite è sulla pagina di pagamento: un'autorizzazione che arriva dopo viene **rilasciata** senza incasso (esito `NOT_PAYABLE`, vedi `payment_api.md`).
 
 **Email**: solo l'annullamento genera un messaggio (`booking_cancelled`). Le altre transizioni riguardano il funzionamento interno della struttura — arrivo, partenza, mancata presentazione — e l'ospite le conosce già perché era presente. Un annullamento deciso al banco, invece, potrebbe non saperlo affatto.
 
-**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`.
+**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`, `test_scadenza_manuale_rifiutata`, `test_conferma_manuale_di_un_pagamento_online_rifiutata`, `test_conferma_manuale_di_una_attesa_email_consentita`.
 
 ---
 
@@ -808,11 +834,26 @@ L'annullamento libera **immediatamente** lo slot.
 | **Body** | `AdminPaymentRegistrationSchema` |
 | **Risposta** | `BookingSchema` |
 
-**Codici**: `200` · `401` · `403` · `404` · `422`
+**Codici**: `200` · `401` · `403` · `404` · `409` operazione incoerente con la prenotazione · `422` contratto violato
 
-**Logica.** Per gli incassi in struttura: contanti, POS, bonifico. I pagamenti online passano dal webhook Stripe (Step G) e non vanno registrati da qui.
+**Logica.** Per i pagamenti in struttura: incasso, rimborso, correzione di una registrazione sbagliata. I pagamenti online passano dal webhook Stripe e non si toccano da qui.
 
-**Test**: `TestOperations::test_registrazione_incasso`.
+**Il campo `amount` non esiste più** *(rimosso il 28/09/2026)*. Era accettato e scartato in silenzio: `Booking` registra quanto è **dovuto**, non quanto è stato **incassato**, e non aveva dove salvarlo (debito #21). Lo schema ora rifiuta i campi non dichiarati, quindi chi lo invia riceve `422` *«Il campo 'amount' non è previsto.»* invece di un `200` fuorviante. L'incasso registrato vale per il totale della prenotazione.
+
+**Contratto** (`422`): `payment_method` solo `CASH_ON_SITE` · `POS_ON_SITE` · `BANK_TRANSFER`; `payment_status` solo `PAID` · `REFUNDED` · `PENDING`; con `PAID` il metodo è obbligatorio.
+
+**Regole sulla prenotazione** (`409`, `InvalidPaymentOperation`):
+
+| Richiesta | Consentita se | Effetto sul metodo |
+|:--|:--|:--|
+| qualsiasi | il pagamento **non** è `STRIPE_CARD` — un pagamento online si rimborsa da Stripe e il webhook aggiorna lo stato | — |
+| `PAID` | prenotazione `CONFIRMED` · `CHECKED_IN` · `COMPLETED` · `NO_SHOW`, e non già `PAID` | impostato |
+| `REFUNDED` | pagamento `PAID`, **qualunque stato della prenotazione, anche `CANCELLED`** — è il caso tipico: si annulla, poi si restituisce | invariato se omesso |
+| `PENDING` | pagamento `PAID` — correzione di un incasso registrato per errore | azzerato |
+
+**Audit**: ogni registrazione riuscita scrive nel log applicativo, **dopo il commit**, codice prenotazione, stato precedente e nuovo, metodo e id dell'admin — nessun dato dell'ospite. Un tentativo rifiutato o un salvataggio fallito non lasciano la riga. Lo storico in tabella registra solo le transizioni della prenotazione; uno storico dei pagamenti andrà con `amount_paid` (debito #21).
+
+**Test**: `TestOperations::test_registrazione_incasso` e l'intera classe `TestManualPayment` (8 test); il contratto in `test_booking_schema.py::TestAdminPaymentRegistration`.
 
 ---
 
@@ -930,9 +971,9 @@ Solo il token, senza `reason`: qui non si cancella nulla. Schema separato da `Bo
 
 | Schema | Campi principali |
 |:--|:--|
-| `AdminBookingCreateSchema` | date, `guest_count`, `room_ids`, `payment_option`, `payment_method?`, **`user_id` XOR `guest`**, `skip_email_confirmation` (default `true`), `mark_as_paid` (default `false`), `admin_notes?` — consente date nel passato |
+| `AdminBookingCreateSchema` | date, `guest_count`, `room_ids`, `payment_option`, `payment_method?`, **`user_id` XOR `guest`**, `skip_email_confirmation` (default `true`), `mark_as_paid` (default `false`), `admin_notes?` — consente date nel passato; **pagamento coerente** (vedi endpoint 12) |
 | `BookingStatusUpdateSchema` | `new_status`, `reason?` — **obbligatoria** se `new_status = CANCELLED` |
-| `AdminPaymentRegistrationSchema` | `payment_method`, `payment_status`, `amount?` |
+| `AdminPaymentRegistrationSchema` | `payment_status` (`PAID` · `REFUNDED` · `PENDING`), `payment_method?` (solo manuali; obbligatorio con `PAID`) — **`extra="forbid"`**: `amount` e ogni altro campo non dichiarato → `422` |
 | `BookingExtendHoldSchema` | `minutes` (1–120) |
 | `BookingSearchFiltersSchema` | `status[]?`, `date_from?`, `date_to?`, `email?`, `code?`, `room_id?`, `page` (default 1), `page_size` (default 20, max 100) |
 
@@ -1103,16 +1144,16 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 
 | File | Test | Database | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_booking_schema.py` | 39 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice |
+| `test_booking_schema.py` | 56 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
-| `test_exception_handler.py` | 4 | no | Errore del client (`422`) contro errore del server (`500`), e cosa non finisce nella risposta |
-| `test_admin_booking_api.py` | 25 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, incassi |
-| `test_email_service.py` | 17 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale |
+| `test_exception_handler.py` | 6 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste |
+| `test_admin_booking_api.py` | 38 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit |
+| `test_email_service.py` | 36 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale, **testi coerenti con le regole**, formato dei termini |
 | `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
-| **Totale eseguito** | **~181** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
+| **Totale eseguito** | **~230** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
 
 ### Il test che conta più di tutti
 
@@ -1173,6 +1214,12 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Annullamento senza motivazione → `422`
 - [ ] Annullamento → lo slot torna immediatamente prenotabile
 - [ ] Registrazione incasso in contanti → `payment_status: PAID`
+- [ ] Incasso con `amount` nel body → `422` *«Il campo 'amount' non è previsto.»*
+- [ ] Incasso su prenotazione annullata → `409`; rimborso sulla stessa, se era pagata → `200`, metodo invariato
+- [ ] Rimborso su prenotazione mai pagata → `409`
+- [ ] `PENDING_CONFIRMATION` → `EXPIRED` dall'admin → `409`
+- [ ] `PENDING_PAYMENT` → `CONFIRMED` dall'admin → `409`
+- [ ] Creazione admin `PAY_NOW` senza `mark_as_paid` → `422`
 - [ ] Proroga hold su prenotazione confermata → `409`
 
 ### Integrità dei dati
@@ -1281,6 +1328,8 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 28/09/2026 | **—** | Riga di audit dell'incasso manuale spostata **dopo il commit** · email: «già saldato» e «importo già pagato» legati a `payment_status`, niente più «modificare» né «annulla» dove non è consentito, avviso di non rimborsabilità per `PAY_NOW`, termine scritto come «entro le 23:59 del giorno prima», «fino al» invece di «fino alle», chiusura distinta per l'annullamento della struttura · errori su elementi di lista nominano il campo (`room_ids`) invece dell'indice |
+| 28/09/2026 | **—** | **Difetto 🔴: una prenotazione annullata dal back-office durante il pagamento veniva incassata** — ora l'autorizzazione si rilascia (`NOT_PAYABLE`) · incasso manuale: rimosso `amount` (accettato e scartato), `extra="forbid"`, solo metodi e stati manuali, regole sullo stato della prenotazione (`InvalidPaymentOperation`, `409`), rimborso consentito anche su annullata, log di audit · l'admin non può più portare a `EXPIRED` né confermare un `PENDING_PAYMENT` · creazione admin: combinazioni di pagamento incoerenti → `422` · messaggio italiano per i campi non previsti |
 | 26/09/2026 | **—** | **`POST /bookings/manage`**: il link di gestione ora apre una pagina che mostra la prenotazione e la politica di cancellazione applicabile, senza consumare il token · `POST /cancel` verifica finalmente la **scadenza** del token · `422` e `500` separati per colpevole · `DB_ECHO` spostato in configurazione · rimosso l'`Annotated` di SQLAlchemy in `extra_service_router` |
 | 26/09/2026 | **—** | **Rimossa la `PATCH` di modifica**: ricalcolava il totale senza sapere quanto fosse stato incassato (debito #21) · token `MANAGE` scade al **check-in** invece che alla partenza · pulizia dei token scaduti oltre i 30 giorni, agganciata allo sweeper con cadenza giornaliera · intervallo sweeper 60 → 300 s · politica di cancellazione documentata per esteso |
 | 20/09/2026 | **G** | Pagamenti Stripe a incasso differito (documento a parte: `payment_api.md`) · quinto template email `booking_slot_lost` · lo sweeper rilascia le autorizzazioni prima di liberare gli slot |

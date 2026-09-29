@@ -5,7 +5,7 @@
   la tua prenotazione è <strong>confermata</strong>. Ti aspettiamo.
 </p>
 
-{% if booking.payment_option.value == "PAY_NOW" %}
+{% if booking.payment_status.value == "PAID" %}
 <p style="margin:0 0 14px; font-size:15px;">
   Il soggiorno è già saldato: all'arrivo non dovrai pagare nulla.
 </p>
@@ -17,8 +17,15 @@
 
 {% if booking.cancellation_deadline %}
 <p style="margin:0 0 14px; font-size:15px;">
-  Puoi annullare <strong>gratuitamente</strong> fino alle
-  {{ booking.cancellation_deadline | istante }}.
+  Puoi annullare <strong>gratuitamente</strong>
+  {{ booking.cancellation_deadline | scadenza }}.
+</p>
+{% endif %}
+
+{% if booking.payment_option.value == "PAY_NOW" %}
+<p style="margin:0 0 14px; font-size:15px;">
+  La tariffa con pagamento anticipato non è rimborsabile: per qualsiasi
+  necessità contatta la struttura.
 </p>
 {% endif %}
 
@@ -29,15 +36,16 @@
       <a href="{{ manage_url }}"
          style="display:inline-block; padding:11px 24px; color:#1f4e79;
                 text-decoration:none; font-size:14.5px; font-weight:600;">
-        Gestisci o annulla la prenotazione
+        Gestisci la prenotazione
       </a>
     </td>
   </tr>
 </table>
 
 <p style="margin:10px 0 0; font-size:12.5px; color:#5c6370;">
-  Conserva questo messaggio: il link qui sopra è il modo più rapido per
-  modificare o annullare il soggiorno.<br>
+  Conserva questo messaggio: dal link qui sopra puoi consultare la
+  prenotazione{% if booking.cancellation_deadline %} e annullarla
+  gratuitamente entro il termine indicato{% endif %}.<br>
   <span style="word-break:break-all;">{{ manage_url }}</span>
 </p>
 {% endif %}

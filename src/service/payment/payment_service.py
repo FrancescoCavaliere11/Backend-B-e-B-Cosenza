@@ -214,6 +214,18 @@ class PaymentService:
         if verifica.outcome == PaymentOutcome.ALREADY_CONFIRMED:
             return "ALREADY_CONFIRMED"
 
+        if verifica.outcome == PaymentOutcome.NOT_PAYABLE:
+            # Annullata o scaduta mentre l'ospite pagava: l'autorizzazione si
+            # rilascia, nessun addebito. Lo slot non è stato ripreso.
+            logger.warning(
+                "Autorizzazione su prenotazione non più pagabile, rilasciata: "
+                "prenotazione=%s intent=%s",
+                verifica.booking_code,
+                intent_id,
+            )
+            await self._cancel_quietly(intent_id)
+            return "NOT_PAYABLE"
+
         if verifica.outcome == PaymentOutcome.AMOUNT_MISMATCH:
             # Non si incassa un importo che non corrisponde al dovuto, in
             # nessuna delle due direzioni.

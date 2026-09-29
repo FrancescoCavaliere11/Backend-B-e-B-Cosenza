@@ -22,6 +22,8 @@ from pydantic import ConfigDict, EmailStr, Field, field_validator, model_validat
 
 from src.config.schemas_config import CustomModel
 from src.data.enumerators import (
+    MANUAL_PAYMENT_METHODS,
+    MANUAL_PAYMENT_STATUSES,
     AuditActorType,
     BookingChannel,
     BookingStatus,
@@ -279,6 +281,11 @@ class AdminBookingCreateSchema(CustomModel):
 
     L'intestatario è `user_id` **oppure** `guest`, mai entrambi né nessuno dei
     due.
+
+    Le opzioni di pagamento devono essere coerenti fra loro
+    (`validate_payment`): una prenotazione nata dal back-office non passa mai
+    da Stripe, quindi ciò che non viene incassato qui non verrà incassato
+    altrove.
     """
 
     check_in: date
@@ -324,6 +331,43 @@ class AdminBookingCreateSchema(CustomModel):
             raise ValueError(
                 "È necessario indicare un utente registrato oppure i dati dell'ospite"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_payment(self) -> "AdminBookingCreateSchema":
+        """
+        Rifiuta le combinazioni che lascerebbero la prenotazione in uno stato
+        impossibile da completare.
+
+        - `payment_method` descrive come l'ospite **ha già pagato**: esiste
+          solo insieme a `mark_as_paid`, ed è sempre un metodo manuale.
+        - Una prenotazione pagata non può nascere in attesa di conferma: se
+          poi scadesse, l'incasso resterebbe su una prenotazione `EXPIRED`.
+        - `PAY_NOW` va incassato subito: nata `CONFIRMED`, la prenotazione
+          non potrebbe più essere pagata online (`start_payment` la rifiuta
+          come già confermata), e resterebbe scontata e mai saldata.
+        """
+        if self.payment_method is not None and self.payment_method not in MANUAL_PAYMENT_METHODS:
+            raise ValueError("Il pagamento con carta online non si registra dal back-office")
+
+        if self.payment_method is not None and not self.mark_as_paid:
+            raise ValueError(
+                "Il metodo di pagamento si indica solo registrando l'incasso"
+            )
+
+        if self.mark_as_paid and self.payment_method is None:
+            raise ValueError("Indica il metodo con cui l'ospite ha pagato")
+
+        if self.mark_as_paid and not self.skip_email_confirmation:
+            raise ValueError(
+                "Una prenotazione già pagata non può restare in attesa di conferma"
+            )
+
+        if self.payment_option == PaymentOption.PAY_NOW and not self.mark_as_paid:
+            raise ValueError(
+                "Il pagamento anticipato dal back-office va registrato come incassato"
+            )
+
         return self
 
 
@@ -403,11 +447,46 @@ class BookingStatusUpdateSchema(CustomModel):
 
 
 class AdminPaymentRegistrationSchema(CustomModel):
-    """Registrazione manuale di un incasso (contanti, POS, bonifico)."""
+    """
+    Registrazione manuale di un pagamento in struttura: incasso, rimborso o
+    correzione di una registrazione sbagliata.
 
-    payment_method: PaymentMethod
+    **Non c'è un campo importo.** C'era, ma il modello non ha dove salvarlo:
+    `Booking` registra quanto è dovuto, non quanto è stato incassato (debito
+    #21). Accettarlo e scartarlo in silenzio faceva credere al back-office di
+    averlo registrato. `extra="forbid"` fa sì che un client che lo invia
+    ancora riceva un `422` esplicito invece di un `200` fuorviante.
+
+    Le regole che dipendono dallo stato della prenotazione vivono nel Service
+    (`_assert_manual_payment_allowed`); qui solo quelle che non ne dipendono.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     payment_status: PaymentStatus
-    amount: Optional[Decimal] = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    payment_method: Optional[PaymentMethod] = None
+
+    @field_validator("payment_status")
+    @classmethod
+    def validate_manual_status(cls, value: PaymentStatus) -> PaymentStatus:
+        if value not in MANUAL_PAYMENT_STATUSES:
+            raise ValueError(
+                "Dal back-office si registra solo un incasso, un rimborso o una correzione"
+            )
+        return value
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_manual_method(cls, value: Optional[PaymentMethod]) -> Optional[PaymentMethod]:
+        if value is not None and value not in MANUAL_PAYMENT_METHODS:
+            raise ValueError("Il pagamento con carta online non si registra dal back-office")
+        return value
+
+    @model_validator(mode="after")
+    def validate_method_required(self) -> "AdminPaymentRegistrationSchema":
+        if self.payment_status == PaymentStatus.PAID and self.payment_method is None:
+            raise ValueError("Indica il metodo con cui l'ospite ha pagato")
+        return self
 
 
 class BookingExtendHoldSchema(CustomModel):
@@ -724,6 +803,6 @@ class WebhookResultSchema(CustomModel):
         description=(
             "CONFIRMED · ALREADY_CONFIRMED · SLOT_LOST · AMOUNT_MISMATCH · "
             "PAYMENT_FAILED · REFUNDED · CANCELED · DUPLICATE · IGNORED · "
-            "UNKNOWN_BOOKING"
+            "UNKNOWN_BOOKING · NOT_PAYABLE"
         )
     )

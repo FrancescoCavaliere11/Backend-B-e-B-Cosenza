@@ -19,7 +19,7 @@ iniettare markup e link in una email che *sembra* provenire dal B&B. I template
 di testo semplice non sono escapati perché non esiste markup da neutralizzare.
 """
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Dict, Optional, Union
 from urllib.parse import quote
@@ -77,6 +77,28 @@ def format_datetime(value: datetime) -> str:
     return local.strftime("%d/%m/%Y alle %H:%M")
 
 
+def format_deadline(value: datetime) -> str:
+    """
+    Termine entro cui fare qualcosa, scritto come lo leggerebbe una persona.
+
+    Un termine che cade alla mezzanotte locale è la fine del giorno prima:
+    «fino al 14/11 alle 00:00» viene letto da molti come «entro la fine del
+    14», cioè con un giorno di troppo. Si scrive quindi l'ultimo minuto utile
+    del giorno precedente.
+
+    - `2026-11-13T23:00Z` (mezzanotte a Roma) → `entro le 23:59 del 13/11/2026`
+    - `2026-07-15T12:00Z` → `entro il 15/07/2026 alle 14:00`
+
+    Cambia solo la forma: il termine calcolato da `PricingService` resta lo
+    stesso istante.
+    """
+    local = value.astimezone(ZoneInfo(settings.app_timezone))
+    if local.time() == time(0, 0):
+        giorno_prima = local.date() - timedelta(days=1)
+        return f"entro le 23:59 del {giorno_prima.strftime('%d/%m/%Y')}"
+    return f"entro il {local.strftime('%d/%m/%Y alle %H:%M')}"
+
+
 def format_money(value: Decimal) -> str:
     """`1234.5` → `1.234,50` (separatori italiani)."""
     quantized = Decimal(value).quantize(Decimal("0.01"))
@@ -123,6 +145,7 @@ class EmailService:
         )
         environment.filters["data"] = format_date
         environment.filters["istante"] = format_datetime
+        environment.filters["scadenza"] = format_deadline
         environment.filters["importo"] = format_money
         return environment
 
@@ -179,13 +202,29 @@ class EmailService:
             },
         )
 
-    async def send_booking_cancelled(self, booking: BookingView) -> None:
-        """Prenotazione annullata, dall'ospite o dal back-office."""
+    async def send_booking_cancelled(
+            self,
+            booking: BookingView,
+            by_structure: bool = False
+    ) -> None:
+        """
+        Prenotazione annullata, dall'ospite o dal back-office.
+
+        :param by_structure: `True` se ad annullare è stata la struttura. Il
+            messaggio cambia chiusura: all'ospite che ha annullato da sé si
+            chiede di segnalare un annullamento che non riconosce; a quello
+            annullato dal banco si dice che è stata la struttura, e come
+            chiedere spiegazioni. La motivazione inserita dall'admin **non**
+            viene mostrata: è un'annotazione interna, non scritta per l'ospite.
+        """
         await self._send(
             template="booking_cancelled",
             subject=f"Prenotazione annullata — {booking.code}",
             booking=booking,
-            context={"booking_url": self._build_link(BOOKING_PATH)},
+            context={
+                "booking_url": self._build_link(BOOKING_PATH),
+                "by_structure": by_structure,
+            },
         )
 
     async def send_booking_slot_lost(self, booking: BookingView) -> None:

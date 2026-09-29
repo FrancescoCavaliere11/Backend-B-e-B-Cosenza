@@ -16,6 +16,7 @@ scaduta, lo slot rimane bloccato per sempre; se diventa `false` su una
 confermata, la camera si vende due volte. Quel metodo è l'unico punto in cui
 il flag viene scritto, e ogni transizione di stato ci passa.
 """
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -76,6 +77,7 @@ from src.exception.custom_exception import (
     InvalidBookingStatusTransition,
     InvalidBookingToken,
     InvalidGuestCount,
+    InvalidPaymentOperation,
     InvalidQuoteToken,
     PaymentRequired,
     RateLimitExceeded,
@@ -87,6 +89,8 @@ from src.security.quote_token import QuotePayload
 from src.security.validators import today_in_app_timezone
 from src.service.pricing_service import PricingService
 from src.service.transaction import run_in_transaction
+
+logger = logging.getLogger(__name__)
 
 #: Transizioni ammesse dalla macchina a stati. Unica fonte di verità:
 #: qualunque cambio di stato passa da qui.
@@ -112,6 +116,16 @@ ALLOWED_TRANSITIONS: Dict[BookingStatus, FrozenSet[BookingStatus]] = {
     BookingStatus.EXPIRED: frozenset(),
     BookingStatus.NO_SHOW: frozenset(),
 }
+
+#: Stati in cui il back-office può registrare un incasso in struttura: il
+#: soggiorno è confermato, in corso o concluso (anche un no-show può saldare
+#: quanto dovuto). Mai su una prenotazione in attesa, annullata o scaduta.
+_PAYABLE_ON_SITE_STATUSES: FrozenSet[BookingStatus] = frozenset({
+    BookingStatus.CONFIRMED,
+    BookingStatus.CHECKED_IN,
+    BookingStatus.COMPLETED,
+    BookingStatus.NO_SHOW,
+})
 
 #: Alfabeto del codice prenotazione: niente 0/O né 1/I/L, che al telefono si
 #: confondono. 31^6 ≈ 887 milioni di combinazioni.
@@ -171,6 +185,10 @@ class PaymentOutcome(str, Enum):
     AMOUNT_MISMATCH = "AMOUNT_MISMATCH"
     #: Nessuna prenotazione risulta associata a quel Payment Intent.
     UNKNOWN_BOOKING = "UNKNOWN_BOOKING"
+    #: La prenotazione non attende più un pagamento: annullata dal
+    #: back-office o scaduta mentre l'ospite era sulla pagina di pagamento.
+    #: Non si incassa e lo slot non si riprende.
+    NOT_PAYABLE = "NOT_PAYABLE"
 
 
 @dataclass
@@ -813,6 +831,7 @@ class BookingService:
         if booking is None:
             raise EntityNotFound("Prenotazione non trovata")
 
+        self._assert_admin_transition(booking, payload.new_status)
         self._assert_status_change_is_coherent(booking, payload.new_status)
 
         now = datetime.now(timezone.utc)
@@ -850,27 +869,60 @@ class BookingService:
             payload: AdminPaymentRegistrationSchema,
             admin_id: UUID
     ) -> BookingSchema:
-        """Registrazione manuale di un incasso in struttura."""
-        return await self._in_transaction(
+        """
+        Registrazione manuale di un pagamento in struttura.
+
+        La riga di audit si scrive **qui, dopo** la transazione: dentro
+        precederebbe il commit, e un salvataggio fallito — due operatori
+        sulla stessa prenotazione, per esempio — lascerebbe nei log un
+        pagamento che il database non ha mai registrato.
+        """
+        booking, previous_status = await self._in_transaction(
             lambda: self._execute_register_payment(booking_id, payload, admin_id)
         )
+
+        # Lo storico degli stati registra solo le transizioni della
+        # prenotazione, non quelle dell'incasso. Nessun dato dell'ospite, solo
+        # il codice.
+        logger.info(
+            "Pagamento manuale: prenotazione=%s %s -> %s metodo=%s admin=%s",
+            booking.code,
+            previous_status.value,
+            booking.payment_status.value,
+            booking.payment_method.value if booking.payment_method else "-",
+            admin_id,
+        )
+        return booking
 
     async def _execute_register_payment(
             self,
             booking_id: UUID,
             payload: AdminPaymentRegistrationSchema,
             admin_id: UUID
-    ) -> BookingSchema:
+    ) -> Tuple[BookingSchema, PaymentStatus]:
+        """:return: la prenotazione aggiornata e lo stato dell'incasso precedente."""
         booking = await self.booking_repository.get_by_id(booking_id, with_items=True)
         if booking is None:
             raise EntityNotFound("Prenotazione non trovata")
 
-        booking.payment_method = payload.payment_method
-        booking.payment_status = payload.payment_status
-        apply_audit_fields(audit=booking, user_id=admin_id)
+        self._assert_manual_payment_allowed(booking, payload.payment_status)
 
+        previous_status = booking.payment_status
+        booking.payment_status = payload.payment_status
+
+        if payload.payment_status == PaymentStatus.PAID:
+            booking.payment_method = payload.payment_method
+        elif payload.payment_status == PaymentStatus.PENDING:
+            # Correzione: la registrazione precedente era sbagliata, quindi
+            # anche il metodo che indicava.
+            booking.payment_method = None
+        elif payload.payment_method is not None:
+            # Rimborso: se non indicato, resta il metodo dell'incasso.
+            booking.payment_method = payload.payment_method
+
+        apply_audit_fields(audit=booking, user_id=admin_id)
         await self.booking_repository.flush()
-        return await self._to_admin_schema(booking)
+        return await self._to_admin_schema(booking), previous_status
 
     async def admin_extend_hold(
             self,
@@ -1169,6 +1221,16 @@ class BookingService:
             return PaymentAuthorizationResult(
                 PaymentOutcome.ALREADY_CONFIRMED, booking.code
             )
+
+        # Solo una prenotazione che attende il pagamento può essere incassata.
+        # Senza questo controllo, una prenotazione annullata dal back-office
+        # mentre l'ospite era sulla pagina di pagamento arrivava fin qui: le
+        # righe camera venivano riattivate — una prenotazione annullata si
+        # riprendeva lo slot — e l'importo veniva incassato, per poi fallire
+        # sulla transizione CANCELLED → CONFIRMED. Denaro preso, nessuna
+        # camera, nessuna email.
+        if booking.status != BookingStatus.PENDING_PAYMENT:
+            return PaymentAuthorizationResult(PaymentOutcome.NOT_PAYABLE, booking.code)
 
         # L'importo si verifica, non si accetta. Il Payment Intent lo abbiamo
         # creato noi, ma fra creazione e autorizzazione il totale potrebbe
@@ -1652,6 +1714,67 @@ class BookingService:
         if new_status == BookingStatus.COMPLETED and today < booking.check_out:
             raise InvalidBookingStatusTransition(
                 "Il soggiorno non può risultare concluso prima della data di partenza"
+            )
+
+    @staticmethod
+    def _assert_admin_transition(booking: Booking, new_status: BookingStatus) -> None:
+        """
+        Transizioni che la macchina a stati ammette ma che l'admin non può
+        disporre, perché appartengono a un altro attore.
+
+        `ALLOWED_TRANSITIONS` resta com'è: lo sweeper ha bisogno di
+        `→ EXPIRED` e il webhook di `PENDING_PAYMENT → CONFIRMED`. Il vincolo
+        riguarda **chi** chiede la transizione, non la transizione in sé.
+        """
+        if new_status == BookingStatus.EXPIRED:
+            raise InvalidBookingStatusTransition(
+                "La scadenza è gestita automaticamente dal sistema"
+            )
+
+        if (
+                new_status == BookingStatus.CONFIRMED
+                and booking.status == BookingStatus.PENDING_PAYMENT
+        ):
+            # Confermarla a mano lascerebbe una prenotazione scontata e mai
+            # pagata, con un'autorizzazione Stripe eventualmente ancora viva.
+            raise InvalidBookingStatusTransition(
+                "Questa prenotazione si conferma solo con il pagamento online"
+            )
+
+    @staticmethod
+    def _assert_manual_payment_allowed(booking: Booking, new_status: PaymentStatus) -> None:
+        """
+        Regole della registrazione manuale di un pagamento.
+
+        | Richiesta  | Consentita se                                              |
+        |:-----------|:-----------------------------------------------------------|
+        | qualsiasi  | il pagamento non è avvenuto online                         |
+        | `PAID`     | soggiorno confermato o in corso/concluso, non già pagato   |
+        | `REFUNDED` | pagamento `PAID`, qualunque stato (anche annullata)        |
+        | `PENDING`  | pagamento `PAID`: correzione di una registrazione sbagliata |
+
+        Un pagamento online si rimborsa dalla dashboard di Stripe, e il
+        webhook aggiorna lo stato: una registrazione manuale produrrebbe due
+        versioni dello stesso fatto.
+        """
+        if booking.payment_method == PaymentMethod.STRIPE_CARD:
+            raise InvalidPaymentOperation(
+                "Il pagamento è avvenuto online: rimborsi e correzioni si gestiscono da Stripe"
+            )
+
+        if new_status == PaymentStatus.PAID:
+            if booking.status not in _PAYABLE_ON_SITE_STATUSES:
+                raise InvalidPaymentOperation(
+                    "Non è possibile registrare un incasso su una prenotazione in questo stato"
+                )
+            if booking.payment_status == PaymentStatus.PAID:
+                raise InvalidPaymentOperation("L'incasso risulta già registrato")
+            return
+
+        # REFUNDED e PENDING partono entrambi da un incasso esistente.
+        if booking.payment_status != PaymentStatus.PAID:
+            raise InvalidPaymentOperation(
+                "L'operazione richiede che la prenotazione risulti pagata"
             )
 
     # ================================================================== #

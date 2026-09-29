@@ -9,7 +9,7 @@
 
 {% if booking.hold_expires_at %}
 <p style="margin:0 0 18px; font-size:15px;">
-  Hai tempo fino alle <strong>{{ booking.hold_expires_at | istante }}</strong>.
+  Hai tempo fino al <strong>{{ booking.hold_expires_at | istante }}</strong>.
   Dopo quel momento le camere tornano disponibili per altri ospiti.
 </p>
 {% endif %}

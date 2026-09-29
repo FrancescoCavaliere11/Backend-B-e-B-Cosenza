@@ -6,9 +6,12 @@ HTTP, e si verifica su un'applicazione minima costruita qui dentro. Usare
 quella vera costringerebbe a trovare un endpoint che sbaglia davvero, cioè a
 tenere un bug in produzione per poterlo testare.
 """
+from typing import List
+from uuid import UUID
+
 from fastapi import Depends, FastAPI, Query
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from src.exception.exception_handler import setup_exception_handler
 from src.routers.dependencies import build_request_model
@@ -22,6 +25,17 @@ class _Risposta(BaseModel):
 class _Filtri(BaseModel):
     """Modello costruito a mano da una dipendenza, come nei router reali."""
     pagina: int
+
+
+class _Chiuso(BaseModel):
+    """Modello che rifiuta i campi non dichiarati, come `AdminPaymentRegistrationSchema`."""
+    model_config = ConfigDict(extra="forbid")
+    stato: str
+
+
+class _ConLista(BaseModel):
+    """Modello con una lista di UUID, come `room_ids` nelle prenotazioni."""
+    room_ids: List[UUID]
 
 
 def _app() -> FastAPI:
@@ -41,6 +55,14 @@ def _app() -> FastAPI:
     @application.get("/errore-del-client")
     async def errore_del_client(f: _Filtri = Depends(filtri)):
         return {"pagina": f.pagina}
+
+    @application.post("/campo-in-piu")
+    async def campo_in_piu(corpo: _Chiuso):
+        return {"stato": corpo.stato}
+
+    @application.post("/lista")
+    async def lista(corpo: _ConLista):
+        return {"n": len(corpo.room_ids)}
 
     return application
 
@@ -101,3 +123,31 @@ async def test_il_422_non_restituisce_il_valore_rifiutato():
 
     for dettaglio in response.json()["details"]:
         assert "input" not in dettaglio
+
+
+async def test_un_campo_non_previsto_e_un_422_leggibile():
+    """
+    Un client che invia un campo rimosso dal contratto — l'`amount`
+    dell'incasso manuale — deve ricevere un messaggio che lo nomini, non il
+    testo inglese di Pydantic.
+    """
+    transport = ASGITransport(app=_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/campo-in-piu", json={"stato": "PAID", "amount": "180.00"})
+
+    assert response.status_code == 422
+    assert response.json()["message"] == "Il campo 'amount' non è previsto."
+    assert "180" not in response.text
+
+
+async def test_un_errore_in_una_lista_nomina_il_campo_non_l_indice():
+    """
+    Il percorso di un errore su un elemento di lista termina con l'indice
+    (`["body", "room_ids", 0]`): il messaggio diceva «campo '0'».
+    """
+    transport = ASGITransport(app=_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/lista", json={"room_ids": ["ROOM_ID"]})
+
+    assert response.status_code == 422
+    assert response.json()["message"].startswith("Errore sul campo 'room_ids'")

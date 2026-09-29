@@ -109,6 +109,25 @@ class PaymentMethod(str, Enum):
     BANK_TRANSFER = "BANK_TRANSFER"
 
 
+#: Strumenti registrabili a mano dal back-office. `STRIPE_CARD` ne è escluso:
+#: un pagamento online lo registra solo il webhook, che ne ha la prova.
+MANUAL_PAYMENT_METHODS: FrozenSet[PaymentMethod] = frozenset({
+    PaymentMethod.CASH_ON_SITE,
+    PaymentMethod.POS_ON_SITE,
+    PaymentMethod.BANK_TRANSFER,
+})
+
+#: Stati di incasso impostabili a mano. Gli altri appartengono al gestore dei
+#: pagamenti (`AUTHORIZED`, `FAILED`), alla creazione (`NOT_REQUIRED`) o
+#: richiedono un importo che il modello non registra (`PARTIALLY_REFUNDED`,
+#: debito #21).
+MANUAL_PAYMENT_STATUSES: FrozenSet[PaymentStatus] = frozenset({
+    PaymentStatus.PAID,
+    PaymentStatus.REFUNDED,
+    PaymentStatus.PENDING,
+})
+
+
 class BookingChannel(str, Enum):
     """Canale di origine della prenotazione (reportistica commerciale)."""
     PUBLIC_GUEST = "PUBLIC_GUEST"

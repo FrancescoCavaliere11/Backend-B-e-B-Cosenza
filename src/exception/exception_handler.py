@@ -67,7 +67,10 @@ def _build_error_message(first_error: Dict[str, Any]) -> str:
     :return: messaggio leggibile.
     """
     loc = first_error.get("loc") or ("campo",)
-    campo = loc[-1]
+    # L'ultimo elemento del percorso può essere un indice di lista
+    # (`["body", "room_ids", 0]`): il nome da mostrare è quello del campo che
+    # la contiene, non la posizione dell'elemento.
+    campo = next((parte for parte in reversed(loc) if not isinstance(parte, int)), "campo")
 
     error_type = first_error.get("type", "")
     tipo_errore = first_error.get("msg", "")
@@ -83,6 +86,11 @@ def _build_error_message(first_error: Dict[str, Any]) -> str:
 
     if "missing" in error_type:
         return f"Il campo '{campo}' è obbligatorio."
+
+    if error_type == "extra_forbidden":
+        # Schemi con `extra="forbid"`, come la registrazione di un incasso:
+        # il campo non esiste più nel contratto e il client va avvisato.
+        return f"Il campo '{campo}' non è previsto."
 
     if error_type == "value_error":
         # Messaggio prodotto dai validator custom del progetto: è già scritto

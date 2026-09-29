@@ -333,6 +333,59 @@ async def test_lo_slot_perduto_non_produce_addebito(
            "NON TI ABBIAMO ADDEBITATO" in messaggio.text_body
 
 
+async def test_una_prenotazione_annullata_durante_il_pagamento_non_viene_incassata(
+        admin_client, rooms, session, stripe_gateway
+):
+    """
+    **Difetto trovato il 28/09/2026.**
+
+    L'ospite apre la pagina di pagamento; nel frattempo il back-office annulla
+    la prenotazione; l'ospite paga. Prima della correzione la verifica
+    controllava solo `== CONFIRMED`: una prenotazione annullata passava, le
+    sue righe camera venivano riattivate — si riprendeva lo slot — e l'importo
+    veniva incassato, per poi fallire sulla transizione CANCELLED → CONFIRMED.
+    Denaro preso, nessuna camera, nessuna email.
+
+    Ora l'autorizzazione si rilascia: nessun incasso, nessun rimborso, e lo
+    slot resta libero.
+    """
+    prenotazione = await _crea_prenotazione_da_pagare(admin_client, rooms[0].id)
+    await _avvia_pagamento(admin_client, prenotazione["code"])
+
+    intent_id = list(stripe_gateway.intents)[0]
+    stripe_gateway.authorize(intent_id)
+
+    booking = await _ricarica(session, prenotazione["code"])
+    annullata = await admin_client.post(
+        f"/api/v1/admin/bookings/{booking.id}/status",
+        json={"new_status": "CANCELLED", "reason": "Richiesta telefonica"},
+    )
+    assert annullata.status_code == 200, annullata.text
+
+    response = await _notifica(
+        admin_client,
+        _evento("payment_intent.amount_capturable_updated", _intent_autorizzato(intent_id)),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["outcome"] == "NOT_PAYABLE"
+
+    operazioni = [c[0] for c in stripe_gateway.calls]
+    assert "capture" not in operazioni
+    assert "cancel" in operazioni
+    assert stripe_gateway.refunds == []
+
+    dopo = await _ricarica(session, prenotazione["code"])
+    assert dopo.status == BookingStatus.CANCELLED
+    assert dopo.payment_status != PaymentStatus.PAID
+
+    # Lo slot non è stato ripreso.
+    righe = await session.execute(
+        select(BookingRoomItem.is_active).where(BookingRoomItem.booking_id == dopo.id)
+    )
+    assert not any(righe.scalars().all())
+
+
 # ===========================================================================
 # Idempotenza
 # ===========================================================================

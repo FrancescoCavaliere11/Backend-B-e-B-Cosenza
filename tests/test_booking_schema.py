@@ -17,9 +17,10 @@ import pytest
 from pydantic import ValidationError
 
 from src.config.config import settings
-from src.data.enumerators import BookingStatus, PaymentMethod, PaymentOption
+from src.data.enumerators import BookingStatus, PaymentMethod, PaymentOption, PaymentStatus
 from src.data.schemas.booking_schema import (
     AdminBookingCreateSchema,
+    AdminPaymentRegistrationSchema,
     AvailabilityRequestSchema,
     BookingLookupSchema,
     BookingQuoteRequestSchema,
@@ -272,6 +273,111 @@ class TestAdminBookingCreate:
             **self._payload(payment_method=PaymentMethod.CASH_ON_SITE, mark_as_paid=True)
         )
         assert schema.payment_method == PaymentMethod.CASH_ON_SITE
+
+    # --- Coerenza delle opzioni di pagamento (28/09/2026) -------------------
+
+    def test_carta_online_rifiutata(self):
+        with pytest.raises(ValidationError, match="carta online"):
+            AdminBookingCreateSchema(
+                **self._payload(payment_method=PaymentMethod.STRIPE_CARD, mark_as_paid=True)
+            )
+
+    def test_metodo_senza_incasso_rifiutato(self):
+        """Il metodo descrive come l'ospite ha pagato, non come pagherà."""
+        with pytest.raises(ValidationError, match="registrando l'incasso"):
+            AdminBookingCreateSchema(**self._payload(payment_method=PaymentMethod.POS_ON_SITE))
+
+    def test_incasso_senza_metodo_rifiutato(self):
+        with pytest.raises(ValidationError, match="metodo"):
+            AdminBookingCreateSchema(**self._payload(mark_as_paid=True))
+
+    def test_pagata_in_attesa_di_conferma_rifiutata(self):
+        """Se scadesse, l'incasso resterebbe su una prenotazione EXPIRED."""
+        with pytest.raises(ValidationError, match="attesa di conferma"):
+            AdminBookingCreateSchema(
+                **self._payload(
+                    payment_method=PaymentMethod.CASH_ON_SITE,
+                    mark_as_paid=True,
+                    skip_email_confirmation=False,
+                )
+            )
+
+    def test_pagamento_anticipato_senza_incasso_rifiutato(self):
+        """
+        Nata confermata, non potrebbe più essere pagata online: resterebbe
+        scontata del 10% e mai saldata.
+        """
+        with pytest.raises(ValidationError, match="anticipato"):
+            AdminBookingCreateSchema(**self._payload(payment_option=PaymentOption.PAY_NOW))
+
+    def test_pagamento_anticipato_incassato_accettato(self):
+        schema = AdminBookingCreateSchema(
+            **self._payload(
+                payment_option=PaymentOption.PAY_NOW,
+                payment_method=PaymentMethod.BANK_TRANSFER,
+                mark_as_paid=True,
+            )
+        )
+        assert schema.mark_as_paid is True
+
+    def test_in_struttura_senza_incasso_accettato(self):
+        schema = AdminBookingCreateSchema(**self._payload(skip_email_confirmation=False))
+        assert schema.payment_method is None
+
+
+class TestAdminPaymentRegistration:
+    """
+    Regole che non dipendono dallo stato della prenotazione. Quelle che ne
+    dipendono sono nel Service e si verificano in `test_admin_booking_api.py`.
+    """
+
+    def test_incasso_manuale_accettato(self):
+        schema = AdminPaymentRegistrationSchema(
+            payment_status=PaymentStatus.PAID, payment_method=PaymentMethod.CASH_ON_SITE
+        )
+        assert schema.payment_method == PaymentMethod.CASH_ON_SITE
+
+    def test_importo_rifiutato(self):
+        """
+        Il campo esisteva ed era scartato in silenzio: il modello non ha dove
+        salvarlo (debito #21). Ora chi lo invia riceve un errore esplicito.
+        """
+        with pytest.raises(ValidationError, match="amount"):
+            AdminPaymentRegistrationSchema(
+                payment_status=PaymentStatus.PAID,
+                payment_method=PaymentMethod.CASH_ON_SITE,
+                amount=Decimal("180.00"),
+            )
+
+    def test_carta_online_rifiutata(self):
+        with pytest.raises(ValidationError, match="carta online"):
+            AdminPaymentRegistrationSchema(
+                payment_status=PaymentStatus.PAID, payment_method=PaymentMethod.STRIPE_CARD
+            )
+
+    @pytest.mark.parametrize(
+        "stato",
+        [
+            PaymentStatus.AUTHORIZED,
+            PaymentStatus.FAILED,
+            PaymentStatus.NOT_REQUIRED,
+            PaymentStatus.PARTIALLY_REFUNDED,
+        ],
+    )
+    def test_stati_non_manuali_rifiutati(self, stato):
+        with pytest.raises(ValidationError, match="incasso, un rimborso o una correzione"):
+            AdminPaymentRegistrationSchema(
+                payment_status=stato, payment_method=PaymentMethod.CASH_ON_SITE
+            )
+
+    def test_incasso_senza_metodo_rifiutato(self):
+        with pytest.raises(ValidationError, match="metodo"):
+            AdminPaymentRegistrationSchema(payment_status=PaymentStatus.PAID)
+
+    @pytest.mark.parametrize("stato", [PaymentStatus.REFUNDED, PaymentStatus.PENDING])
+    def test_rimborso_e_correzione_senza_metodo_accettati(self, stato):
+        schema = AdminPaymentRegistrationSchema(payment_status=stato)
+        assert schema.payment_method is None
 
 
 # ===========================================================================

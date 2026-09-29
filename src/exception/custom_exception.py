@@ -190,6 +190,19 @@ class ConcurrentModification(AppException):
     )
 
 
+class InvalidPaymentOperation(AppException):
+    """
+    Registrazione manuale di un pagamento incoerente con la prenotazione.
+
+    Distinta da `InvalidBookingStatusTransition` perché riguarda lo stato
+    dell'**incasso**, non quello del soggiorno: incassare su una prenotazione
+    annullata, rimborsare ciò che non è stato pagato, correggere a mano un
+    pagamento che appartiene a Stripe.
+    """
+    status_code = 409
+    default_message = "L'operazione non è compatibile con lo stato del pagamento"
+
+
 class PaymentRequired(AppException):
     status_code = 402
     default_message = "È necessario completare il pagamento per confermare la prenotazione"

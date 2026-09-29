@@ -208,7 +208,9 @@ async def change_status(
     booking = await service.admin_change_status(booking_id, payload, current_user.id)
 
     if booking.status == BookingStatus.CANCELLED:
-        background.add_task(get_email_service().send_booking_cancelled, booking)
+        background.add_task(
+            get_email_service().send_booking_cancelled, booking, by_structure=True
+        )
 
     return booking
 

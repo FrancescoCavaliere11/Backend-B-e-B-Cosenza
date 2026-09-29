@@ -6,7 +6,13 @@
   tornate disponibili e non ti aspettiamo più per le date indicate qui sotto.
 </p>
 
-{% if booking.payment_option.value == "PAY_NOW" %}
+{% if by_structure %}
+<p style="margin:0 0 14px; font-size:15px;">
+  L'annullamento è stato registrato dalla struttura.
+</p>
+{% endif %}
+
+{% if booking.payment_status.value == "PAID" %}
 <p style="margin:0 0 14px; font-size:15px;">
   Per quanto riguarda l'importo già pagato, ti contatteremo separatamente.
 </p>
@@ -27,6 +33,10 @@
 
 {% block footer_note %}
 <p style="margin:18px 0 0; font-size:13px; color:#5c6370;">
+  {% if by_structure %}
+  Se non te lo aspettavi, contattaci: ti spiegheremo il motivo.
+  {% else %}
   Non sei stato tu ad annullare? Scrivici: ricostruiamo insieme cosa è successo.
+  {% endif %}
 </p>
 {% endblock %}
