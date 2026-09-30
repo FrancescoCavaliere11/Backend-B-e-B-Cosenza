@@ -1,0 +1,24 @@
+# ============================================================================
+# Dipendenze di SVILUPPO — include quelle di esercizio.
+#
+#     python3.12 -m venv .venv
+#     source .venv/bin/activate
+#     pip install -r requirements-dev.txt
+#
+# In produzione basta `requirements.txt`.
+# ============================================================================
+
+-r requirements.txt
+
+# --- Test --------------------------------------------------------------------
+pytest==8.4.2
+pytest-asyncio==1.2.0             # senza, nessun test asincrono parte (asyncio_mode = auto)
+
+# --- Documentazione ----------------------------------------------------------
+markdown==3.11                    # docs/api/build_pdf.py
+
+# --- Dipendenze indirette (fissate per riproducibilità) ----------------------
+iniconfig==2.1.0
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
