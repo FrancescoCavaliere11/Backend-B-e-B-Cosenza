@@ -26,6 +26,7 @@ from src.data.enumerators import (
     MANUAL_PAYMENT_STATUSES,
     AuditActorType,
     BookingChannel,
+    BookingSortOrder,
     BookingStatus,
     GuestCancellationBlock,
     PaymentMethod,
@@ -686,9 +687,14 @@ class BookingListItemSchema(CustomModel):
     status: BookingStatus
     check_in: date
     check_out: date
+    guest_firstname: str
     guest_lastname: str
     guest_email: EmailStr
+    guest_count: int
     rooms_count: int
+    #: Nomi delle camere, nell'ordine delle righe camera. Già caricati dalla
+    #: query dell'elenco: nessun costo aggiuntivo.
+    room_names: List[str] = Field(default_factory=list)
     total_price: Decimal
     payment_status: PaymentStatus
 
@@ -716,6 +722,8 @@ class BookingSearchFiltersSchema(CustomModel):
     email: Optional[EmailStr] = None
     code: Optional[str] = Field(default=None, max_length=20)
     room_id: Optional[UUID] = None
+    sort: BookingSortOrder = BookingSortOrder.CHECK_IN_DESC
+
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=100)
 

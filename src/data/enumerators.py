@@ -128,6 +128,21 @@ MANUAL_PAYMENT_STATUSES: FrozenSet[PaymentStatus] = frozenset({
 })
 
 
+class BookingSortOrder(str, Enum):
+    """
+    Ordinamento dell'elenco amministrativo delle prenotazioni.
+
+    A parità di chiave l'ordine è sempre completato dall'identificativo, così
+    una prenotazione non può comparire su due pagine diverse.
+    """
+    #: Arrivo più lontano per primo. Predefinito dell'API, per compatibilità.
+    CHECK_IN_DESC = "CHECK_IN_DESC"
+    #: Arrivo più vicino per primo.
+    CHECK_IN_ASC = "CHECK_IN_ASC"
+    #: Ultime inserite per prime. Predefinito della schermata del back-office.
+    CREATED_DESC = "CREATED_DESC"
+
+
 class BookingChannel(str, Enum):
     """Canale di origine della prenotazione (reportistica commerciale)."""
     PUBLIC_GUEST = "PUBLIC_GUEST"

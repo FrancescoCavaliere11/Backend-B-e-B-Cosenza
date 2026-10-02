@@ -689,12 +689,14 @@ Tutte le rotte sotto `/api/v1/admin/bookings` richiedono un utente con
 | | |
 |:--|:--|
 | **Accesso** | Amministrativo |
-| **Query** | `status` (ripetibile) · `date_from` · `date_to` · `email` · `code` · `room_id` · `page` (default 1) · `page_size` (default 20, max 100) |
+| **Query** | `status` (ripetibile) · `date_from` · `date_to` · `email` · `code` · `room_id` · **`sort`** · `page` (default 1) · `page_size` (default 20, max 100) |
 | **Risposta** | `PaginatedBookingsSchema` |
 
-**Codici**: `200` · `401` · `403` · `422` intervallo di date incoerente o `page_size` oltre il limite
+**Codici**: `200` · `401` · `403` · `422` intervallo di date incoerente, `page_size` oltre il limite, `sort` sconosciuto
 
-**Logica.** Ordinate per data di arrivo decrescente, poi per creazione. `date_from` seleziona i soggiorni che **terminano dopo** quella data e `date_to` quelli che **iniziano prima**: insieme individuano i soggiorni che si sovrappongono all'intervallo, non solo quelli interamente contenuti.
+**Ordinamento** *(dal 01/10/2026)*. `sort` vale `CHECK_IN_DESC` (predefinito: arrivo più lontano per primo), `CHECK_IN_ASC` (arrivo più vicino per primo) o `CREATED_DESC` (ultime inserite per prime). L'ultimo criterio è sempre l'id, così una prenotazione non compare su due pagine diverse.
+
+**Logica.** `date_from` seleziona i soggiorni che **terminano dopo** quella data e `date_to` quelli che **iniziano prima**: insieme individuano i soggiorni che si sovrappongono all'intervallo, non solo quelli interamente contenuti.
 
 Il filtro `status` si ripete per selezionarne più di uno: `?status=CONFIRMED&status=CHECKED_IN`.
 
@@ -975,7 +977,7 @@ Solo il token, senza `reason`: qui non si cancella nulla. Schema separato da `Bo
 | `BookingStatusUpdateSchema` | `new_status`, `reason?` — **obbligatoria** se `new_status = CANCELLED` |
 | `AdminPaymentRegistrationSchema` | `payment_status` (`PAID` · `REFUNDED` · `PENDING`), `payment_method?` (solo manuali; obbligatorio con `PAID`) — **`extra="forbid"`**: `amount` e ogni altro campo non dichiarato → `422` |
 | `BookingExtendHoldSchema` | `minutes` (1–120) |
-| `BookingSearchFiltersSchema` | `status[]?`, `date_from?`, `date_to?`, `email?`, `code?`, `room_id?`, `page` (default 1), `page_size` (default 20, max 100) |
+| `BookingSearchFiltersSchema` | `status[]?`, `date_from?`, `date_to?`, `email?`, `code?`, `room_id?`, `sort` (`BookingSortOrder`, default `CHECK_IN_DESC`), `page` (default 1), `page_size` (default 20, max 100) |
 
 > **Nessuno schema di input contiene un campo prezzo.** C'è un test che lo verifica.
 
@@ -1070,7 +1072,7 @@ Porta la vista completa, non quella pubblica: l'admin deve vedere audit, canale 
 
 #### `BookingListItemSchema` e `PaginatedBookingsSchema`
 
-Riga di elenco: `id`, `code`, `status`, `check_in`, `check_out`, `guest_lastname`, `guest_email`, `rooms_count`, `total_price`, `payment_status`.
+Riga di elenco: `id`, `code`, `status`, `check_in`, `check_out`, `guest_firstname`, `guest_lastname`, `guest_email`, `guest_count`, `rooms_count`, `room_names[]`, `total_price`, `payment_status`. *(`guest_firstname`, `guest_count` e `room_names` dal 01/10/2026.)*
 Contenitore: `items[]`, `total`, `page`, `page_size`, `pages`.
 
 ---
@@ -1144,16 +1146,17 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 
 | File | Test | Database | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_booking_schema.py` | 56 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
+| `test_booking_schema.py` | 58 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
 | `test_exception_handler.py` | 6 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste |
-| `test_admin_booking_api.py` | 38 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit |
+| `test_admin_booking_api.py` | 43 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga** |
+| `test_room_api.py` | 3 | sì | Una camera con prenotazioni non si elimina, nemmeno se disattivata |
 | `test_email_service.py` | 36 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale, **testi coerenti con le regole**, formato dei termini |
 | `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
-| **Totale eseguito** | **~230** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
+| **Totale eseguito** | **~250** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
 
 ### Il test che conta più di tutti
 
@@ -1224,7 +1227,8 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 
 ### Integrità dei dati
 - [ ] Modificare il prezzo di una camera dopo una prenotazione → il totale storico resta invariato
-- [ ] Cancellare una camera con prenotazioni → `409` `EntityInUse`
+- [ ] Cancellare una camera con prenotazioni → `409` `EntityInUse`, con «nemmeno se disattivata» nel messaggio
+- [ ] Disattivare quella camera e riprovare → ancora `409`: disattivare è l'alternativa alla cancellazione, non il prerequisito
 - [ ] Cancellare un utente → le sue prenotazioni sopravvivono con `user_id` a `null`
 
 ### Email
@@ -1328,6 +1332,8 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 01/10/2026 | **—** | `GET /admin/bookings/`: ordinamento `sort` (`CHECK_IN_DESC` · `CHECK_IN_ASC` · `CREATED_DESC`); la riga di elenco porta anche `guest_firstname`, `guest_count` e `room_names` |
+| 01/10/2026 | **—** | Cancellazione di una camera con prenotazioni: il messaggio ora dice «nemmeno se disattivata» e suggerisce di disattivarla per non riceverne di nuove. Il vecchio testo veniva letto come «disattivala e poi potrai eliminarla». Nuovo `tests/test_room_api.py` (3 test) |
 | 28/09/2026 | **—** | Riga di audit dell'incasso manuale spostata **dopo il commit** · email: «già saldato» e «importo già pagato» legati a `payment_status`, niente più «modificare» né «annulla» dove non è consentito, avviso di non rimborsabilità per `PAY_NOW`, termine scritto come «entro le 23:59 del giorno prima», «fino al» invece di «fino alle», chiusura distinta per l'annullamento della struttura · errori su elementi di lista nominano il campo (`room_ids`) invece dell'indice |
 | 28/09/2026 | **—** | **Difetto 🔴: una prenotazione annullata dal back-office durante il pagamento veniva incassata** — ora l'autorizzazione si rilascia (`NOT_PAYABLE`) · incasso manuale: rimosso `amount` (accettato e scartato), `extra="forbid"`, solo metodi e stati manuali, regole sullo stato della prenotazione (`InvalidPaymentOperation`, `409`), rimborso consentito anche su annullata, log di audit · l'admin non può più portare a `EXPIRED` né confermare un `PENDING_PAYMENT` · creazione admin: combinazioni di pagamento incoerenti → `422` · messaggio italiano per i campi non previsti |
 | 26/09/2026 | **—** | **`POST /bookings/manage`**: il link di gestione ora apre una pagina che mostra la prenotazione e la politica di cancellazione applicabile, senza consumare il token · `POST /cancel` verifica finalmente la **scadenza** del token · `422` e `500` separati per colpevole · `DB_ECHO` spostato in configurazione · rimosso l'`Annotated` di SQLAlchemy in `extra_service_router` |

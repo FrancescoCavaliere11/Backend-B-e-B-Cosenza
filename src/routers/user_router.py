@@ -20,9 +20,9 @@ async def get_user_service(db: AsyncSession = Depends(get_async_session)):
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-@user_router.post("/", status_code=status.HTTP_201_CREATED)
+''' @user_router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserCreateSchema,
     service: Annotated[UserService, Depends(get_user_service)]
 ) -> None:
-    return await service.register_new_user(payload)
+    return await service.register_new_user(payload) '''

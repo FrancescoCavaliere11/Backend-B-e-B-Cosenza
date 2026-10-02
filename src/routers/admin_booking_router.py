@@ -26,7 +26,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 
-from src.data.enumerators import BookingStatus
+from src.data.enumerators import BookingSortOrder, BookingStatus
 from src.data.model.user import User
 from src.data.schemas.booking_schema import (
     AdminBookingCreateSchema,
@@ -62,6 +62,7 @@ def get_search_filters(
         email: Optional[str] = Query(None, description="Email dell'ospite (confronto esatto)"),
         code: Optional[str] = Query(None, description="Codice prenotazione"),
         room_id: Optional[UUID] = Query(None, description="Prenotazioni che includono questa camera"),
+        sort: BookingSortOrder = Query(BookingSortOrder.CHECK_IN_DESC, description="Ordinamento"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100)
 ) -> BookingSearchFiltersSchema:
@@ -84,6 +85,7 @@ def get_search_filters(
         email=email,
         code=code,
         room_id=room_id,
+        sort=sort,
         page=page,
         page_size=page_size,
     )

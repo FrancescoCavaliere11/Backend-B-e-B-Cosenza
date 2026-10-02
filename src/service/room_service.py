@@ -182,9 +182,12 @@ class RoomService:
             # una camera con prenotazioni associate non è cancellabile, perché
             # eliminarla distruggerebbe lo storico contabile di quei soggiorni.
             # Prima dello Step A questo caso produceva un 500.
+            # 
             raise EntityInUse(
-                "La camera ha prenotazioni associate e non può essere eliminata. "
-                "Per toglierla dalla vendita, impostala come non disponibile."
+                "La camera ha prenotazioni associate e non può essere eliminata, "
+                "nemmeno se disattivata: le prenotazioni esistenti devono restare "
+                "consultabili. Per non riceverne di nuove, disattivala: non comparirà "
+                "più fra le camere prenotabili."
             ) from error
 
         if not room_deleted:

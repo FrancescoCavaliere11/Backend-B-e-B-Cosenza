@@ -238,6 +238,67 @@ class TestRead:
 
 
 # ===========================================================================
+# Ordinamento e contenuto della riga (01/10/2026)
+# ===========================================================================
+
+async def _create_two(admin_client, rooms):
+    """Due prenotazioni distinguibili: Bianchi (prima creata) e Verdi (seconda, arrivo prima)."""
+    prima = await _create_booking(admin_client, [rooms[0].id])
+    seconda = await _create_booking(
+        admin_client,
+        [rooms[1].id],
+        check_in=(CHECK_IN - timedelta(days=10)).isoformat(),
+        check_out=(CHECK_OUT - timedelta(days=10)).isoformat(),
+        guest={**GUEST, "firstname": "Luca", "lastname": "Verdi", "email": "luca.verdi@example.com"},
+    )
+    return prima, seconda
+
+
+async def _search(admin_client, **params) -> dict:
+    response = await admin_client.get(BASE + "/", params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+class TestSortAndRow:
+
+    async def test_ordinamento_predefinito_arrivo_piu_lontano(self, admin_client, rooms):
+        prima, seconda = await _create_two(admin_client, rooms)
+
+        body = await _search(admin_client)
+
+        assert [item["code"] for item in body["items"]] == [prima["code"], seconda["code"]]
+
+    async def test_arrivo_piu_vicino(self, admin_client, rooms):
+        prima, seconda = await _create_two(admin_client, rooms)
+
+        body = await _search(admin_client, sort="CHECK_IN_ASC")
+
+        assert [item["code"] for item in body["items"]] == [seconda["code"], prima["code"]]
+
+    async def test_ultime_inserite(self, admin_client, rooms):
+        prima, seconda = await _create_two(admin_client, rooms)
+
+        body = await _search(admin_client, sort="CREATED_DESC")
+
+        assert [item["code"] for item in body["items"]] == [seconda["code"], prima["code"]]
+
+    async def test_ordinamento_sconosciuto_rifiutato(self, admin_client, rooms):
+        response = await admin_client.get(BASE + "/", params={"sort": "A_CASO"})
+        assert response.status_code == 422
+
+    async def test_la_riga_porta_nome_ospiti_e_camere(self, admin_client, rooms):
+        await _create_booking(admin_client, [rooms[0].id])
+
+        riga = (await _search(admin_client))["items"][0]
+
+        assert riga["guest_firstname"] == GUEST["firstname"]
+        assert riga["guest_lastname"] == GUEST["lastname"]
+        assert riga["guest_count"] == 2
+        assert riga["room_names"] == [rooms[0].name]
+
+
+# ===========================================================================
 # Modifica: rimossa
 # ===========================================================================
 

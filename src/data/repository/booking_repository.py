@@ -27,11 +27,26 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from src.data.enumerators import OCCUPYING_BOOKING_STATUSES, PENDING_BOOKING_STATUSES, BookingStatus
+from src.data.enumerators import (
+    OCCUPYING_BOOKING_STATUSES,
+    PENDING_BOOKING_STATUSES,
+    BookingSortOrder,
+    BookingStatus,
+)
 from src.data.model.booking import Booking
 from src.data.model.booking_room_item import BookingRoomItem
 from src.data.model.room import Room
 from src.data.schemas.booking_schema import BookingSearchFiltersSchema
+
+
+#: Criteri di ordinamento dell'elenco. L'ultimo criterio è sempre l'id: con
+#: chiavi uguali l'ordine resterebbe indefinito, e la stessa prenotazione
+#: potrebbe comparire su due pagine diverse.
+_SORT_ORDER = {
+    BookingSortOrder.CHECK_IN_DESC: (Booking.check_in.desc(), Booking.created_at.desc(), Booking.id),
+    BookingSortOrder.CHECK_IN_ASC: (Booking.check_in.asc(), Booking.created_at.desc(), Booking.id),
+    BookingSortOrder.CREATED_DESC: (Booking.created_at.desc(), Booking.id),
+}
 
 
 class BookingRepository:
@@ -465,7 +480,7 @@ class BookingRepository:
         query = (
             select(Booking)
             .options(selectinload(Booking.items).selectinload(BookingRoomItem.room))
-            .order_by(Booking.check_in.desc(), Booking.created_at.desc())
+            .order_by(*_SORT_ORDER[filters.sort])
             .limit(filters.page_size)
             .offset(filters.offset)
         )

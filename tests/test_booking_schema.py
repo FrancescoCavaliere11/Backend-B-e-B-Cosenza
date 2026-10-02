@@ -17,7 +17,13 @@ import pytest
 from pydantic import ValidationError
 
 from src.config.config import settings
-from src.data.enumerators import BookingStatus, PaymentMethod, PaymentOption, PaymentStatus
+from src.data.enumerators import (
+    BookingSortOrder,
+    BookingStatus,
+    PaymentMethod,
+    PaymentOption,
+    PaymentStatus,
+)
 from src.data.schemas.booking_schema import (
     AdminBookingCreateSchema,
     AdminPaymentRegistrationSchema,
@@ -427,3 +433,13 @@ class TestSearchFilters:
     def test_page_size_oltre_il_limite_rifiutata(self):
         with pytest.raises(ValidationError):
             BookingSearchFiltersSchema(page_size=500)
+
+    # --- Ordinamento (01/10/2026) ------------------------------------------
+
+    def test_ordinamento_predefinito_dell_api(self):
+        """Il predefinito dell'API resta quello storico: nessun client cambia comportamento."""
+        assert BookingSearchFiltersSchema().sort == BookingSortOrder.CHECK_IN_DESC
+
+    def test_ordinamento_sconosciuto_rifiutato(self):
+        with pytest.raises(ValidationError):
+            BookingSearchFiltersSchema(sort="A_CASO")

@@ -1549,9 +1549,12 @@ class BookingService:
                     status=booking.status,
                     check_in=booking.check_in,
                     check_out=booking.check_out,
+                    guest_firstname=booking.guest_firstname,
                     guest_lastname=booking.guest_lastname,
                     guest_email=booking.guest_email,
+                    guest_count=booking.guest_count,
                     rooms_count=len(booking.items),
+                    room_names=[item.room.name for item in booking.items if item.room],
                     total_price=booking.total_price,
                     payment_status=booking.payment_status,
                 )
