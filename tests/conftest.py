@@ -157,13 +157,27 @@ async def api_client(session_factory):
 
     from src.config.database_config import get_async_session
     from src.main import app
+    from src.routers.admin_booking_router import get_expiration_service
     from src.security.rate_limiter import reset_rate_limiter
+    from src.service.booking_expiration_service import BookingExpirationService
 
     async def override_session():
         async with session_factory() as db_session:
             yield db_session
 
     app.dependency_overrides[get_async_session] = override_session
+
+    # Lo sweeper dell'endpoint di manutenzione apre sessioni **proprie**: una
+    # passata ne usa più d'una. Senza questa sostituzione userebbe
+    # `async_session_maker`, cioè il database di sviluppo, e il test
+    # lavorerebbe sui dati veri credendo di essere isolato.
+    #
+    # Nessun gateway: i test che ne hanno bisogno passano dalla fixture
+    # `stripe_gateway`, che rifà questo override con quello finto.
+    app.dependency_overrides[get_expiration_service] = (
+        lambda: BookingExpirationService(session_factory)
+    )
+
     reset_rate_limiter()
 
     async with AsyncClient(
@@ -211,7 +225,7 @@ def email_backend():
 
 
 @pytest_asyncio.fixture
-async def stripe_gateway(api_client):
+async def stripe_gateway(api_client, session_factory):
     """
     Sostituisce Stripe con un gateway in memoria.
 
@@ -225,11 +239,21 @@ async def stripe_gateway(api_client):
     tutti gli override.
     """
     from src.main import app
+    from src.routers.admin_booking_router import get_expiration_service
     from src.routers.payment_router import get_stripe_gateway
+    from src.service.booking_expiration_service import BookingExpirationService
     from src.service.payment.gateway import FakeStripeGateway
 
     gateway = FakeStripeGateway()
     app.dependency_overrides[get_stripe_gateway] = lambda: gateway
+
+    # Anche lo sweeper manuale deve vederlo: `POST /admin/bookings/sweep-expired`
+    # rilascia le autorizzazioni prima di liberare gli slot, e senza gateway
+    # si limiterebbe a non toccare le prenotazioni che ne hanno una — un test
+    # verde che non prova nulla.
+    app.dependency_overrides[get_expiration_service] = (
+        lambda: BookingExpirationService(session_factory, gateway=gateway)
+    )
 
     return gateway
 

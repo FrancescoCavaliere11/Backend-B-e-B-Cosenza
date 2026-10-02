@@ -4,7 +4,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.config.config import settings
-from src.config.database_config import async_session_maker
 from src.config.logging_config import configure_logging
 from src.routers.extra_service_router import extra_service_router
 from src.routers.user_router import user_router
@@ -15,7 +14,7 @@ from src.routers.booking_router import booking_router
 from src.routers.admin_booking_router import admin_booking_router
 from src.routers.payment_router import payment_router
 from src.exception.exception_handler import setup_exception_handler
-from src.service.booking_expiration_service import BookingExpirationService
+from src.service.booking_expiration_service import build_expiration_service
 
 from src.data.model.user import User
 from src.data.model.room import Room
@@ -55,16 +54,12 @@ async def lifespan(application: FastAPI):
     L'arresto attende la fine della passata in corso, così un riavvio non
     interrompe una transazione a metà.
     """
-    # Lo sweeper riceve il gateway: prima di liberare uno slot deve poter
-    # rilasciare l'eventuale autorizzazione ancora viva su Stripe. Senza
-    # gateway non tocca le prenotazioni che ne hanno una.
-    gateway = None
-    if settings.stripe_enabled:
-        from src.routers.payment_router import get_stripe_gateway
-
-        gateway = get_stripe_gateway()
-
-    sweeper = BookingExpirationService(async_session_maker, gateway=gateway)
+    # La composizione — sessioni e gateway Stripe — sta in
+    # `build_expiration_service`, condivisa con l'endpoint amministrativo
+    # `POST /admin/bookings/sweep-expired`. Due composizioni separate avevano
+    # già prodotto una divergenza silenziosa: il giro automatico rilasciava le
+    # autorizzazioni, quello manuale no.
+    sweeper = build_expiration_service()
 
     if settings.sweeper_enabled:
         sweeper.start()

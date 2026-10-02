@@ -10,7 +10,7 @@ sono state vendute ad altri, l'autorizzazione viene rilasciata e l'ospite non
 paga nulla. Non "viene rimborsato": non paga.
 """
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 
@@ -599,3 +599,52 @@ async def test_un_evento_che_non_ci_riguarda_viene_confermato(api_client, stripe
 
     assert response.status_code == 200
     assert response.json()["outcome"] == "IGNORED"
+
+
+# ===========================================================================
+# Lo sweeper manuale non è una versione ridotta di quello automatico
+# ===========================================================================
+
+async def test_lo_sweeper_manuale_rilascia_l_autorizzazione(
+        api_client, admin_client, rooms, session, stripe_gateway
+):
+    """
+    `POST /admin/bookings/sweep-expired` deve rilasciare le autorizzazioni
+    **prima** di rimettere in vendita lo slot, esattamente come il giro
+    automatico (decisione #31).
+
+    Fino al 02/10/2026 non lo faceva: l'endpoint chiamava direttamente
+    `expire_pending`, saltando `_release_authorizations`. Lo slot tornava
+    quindi acquistabile mentre su Stripe esisteva ancora un'autorizzazione
+    viva, e l'ospite che completava il pagamento vedeva un addebito riuscire
+    e poi annullarsi — l'esperienza che l'incasso differito esiste per
+    evitare.
+
+    Il difetto era invisibile: nessun test rosso, nessuna eccezione, e il
+    `expired_count` nella risposta era quello giusto. Si vedeva solo
+    guardando *che cosa era stato chiesto a Stripe*, che è esattamente ciò
+    che `FakeStripeGateway.calls` registra.
+    """
+    booking = await _crea_prenotazione_da_pagare(api_client, rooms[0].id)
+    await _avvia_pagamento(api_client, booking["code"])
+
+    # Blocco scaduto: da qui in poi la prenotazione è materia dello sweeper.
+    await session.execute(
+        update(Booking)
+        .where(Booking.code == booking["code"])
+        .values(hold_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+    )
+    await session.commit()
+
+    response = await admin_client.post("/api/v1/admin/bookings/sweep-expired")
+    assert response.status_code == 200, response.text
+    assert response.json()["expired_count"] == 1
+
+    operazioni = [chiamata[0] for chiamata in stripe_gateway.calls]
+    assert "cancel" in operazioni, (
+        "Lo slot è stato liberato senza rilasciare l'autorizzazione su Stripe"
+    )
+    assert "capture" not in operazioni, "Nessun incasso deve avvenire qui"
+
+    aggiornata = await _ricarica(session, booking["code"])
+    assert aggiornata.status == BookingStatus.EXPIRED

@@ -20,7 +20,7 @@ o un rimborso. Finché quel modello non cambia, una prenotazione pagata si
 annulla e si ricrea — un'operazione in più al banco, ma nessun dato perduto.
 Il dettaglio è nel debito tecnico #21.
 """
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Annotated, List, Optional
 from uuid import UUID
 
@@ -42,7 +42,10 @@ from src.data.schemas.booking_schema import (
 from src.routers.booking_router import schedule_creation_email, get_booking_service
 from src.routers.dependencies import build_request_model
 from src.security.authorization import is_admin_user
-from src.service.booking_expiration_service import dispatch_expiration_notices
+from src.service.booking_expiration_service import (
+    BookingExpirationService,
+    build_expiration_service,
+)
 from src.service.booking_service import BookingService
 from src.service.email.email_service import get_email_service
 
@@ -89,6 +92,22 @@ def get_search_filters(
         page=page,
         page_size=page_size,
     )
+
+
+def get_expiration_service() -> BookingExpirationService:
+    """
+    Fornisce lo sweeper all'endpoint di manutenzione.
+
+    Delega a `build_expiration_service`, la stessa composizione che usa il
+    `lifespan`: sessioni proprie — non quella della richiesta, perché una
+    passata apre e chiude più transazioni — e gateway Stripe quando i
+    pagamenti sono attivi.
+
+    È una dipendenza e non una chiamata diretta perché i test la
+    sostituiscono con `dependency_overrides`, puntandola al database di
+    prova.
+    """
+    return build_expiration_service()
 
 
 # --------------------------------------------------------------------------- #
@@ -268,28 +287,30 @@ async def extend_hold(
     summary="Esegue subito lo sweeper delle prenotazioni scadute",
 )
 async def sweep_expired(
-        service: Annotated[BookingService, Depends(get_booking_service)],
+        sweeper: Annotated[BookingExpirationService, Depends(get_expiration_service)],
 ) -> SweepResultSchema:
     """
-    Porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto, senza
-    attendere il giro automatico.
+    Esegue **una passata dello sweeper**, senza attendere il giro automatico.
 
     Serve a due cose: collaudare il meccanismo senza stare quindici minuti a
     guardare l'orologio, e avere una leva operativa quando lo sweeper in
     background è disattivato (`sweeper_enabled = false`) perché si preferisce
     pilotarlo da uno scheduler esterno.
 
+    **È esattamente la stessa passata**, non una versione ridotta: rilascio
+    delle autorizzazioni Stripe, transizione a `EXPIRED`, commit, notifiche,
+    nello stesso ordine. Fino al 02/10/2026 questo endpoint chiamava
+    direttamente `expire_pending`, saltando il rilascio delle autorizzazioni:
+    poteva quindi rimettere in vendita uno slot su cui esisteva ancora
+    un'autorizzazione viva, cioè proprio ciò che la decisione #31 vieta al
+    giro automatico. Chiamare `sweep_once` rende impossibile che le due vie
+    tornino a divergere.
+
     Non è un'operazione distruttiva né rischiosa: libera slot che il sistema
     considera già liberi. Eseguirla due volte di fila non cambia nulla, perché
     la seconda passata non trova più prenotazioni in attesa scadute.
 
-    Le email partono **dopo** il commit, come nel giro automatico.
+    Le email partono **dopo** il commit, come nel giro automatico — ora per
+    costruzione, dato che è lo stesso codice.
     """
-    notices = await service.expire_pending()
-    notified = await dispatch_expiration_notices(notices, get_email_service())
-
-    return SweepResultSchema(
-        expired_count=len(notices),
-        notified_count=notified,
-        swept_at=datetime.now(timezone.utc),
-    )
+    return await sweeper.sweep_once()

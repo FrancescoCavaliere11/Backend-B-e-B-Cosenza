@@ -40,6 +40,7 @@ from typing import List, Optional, Sequence
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.config.config import settings
+from src.config.database_config import async_session_maker
 from src.data.repository.booking_repository import BookingRepository
 from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
 from src.data.repository.booking_token_repository import BookingTokenRepository
@@ -358,3 +359,43 @@ class BookingExpirationService:
             pass
         finally:
             self._task = None
+
+
+def build_expiration_service(
+        email_service: Optional[EmailService] = None
+) -> BookingExpirationService:
+    """
+    Compone lo sweeper come va composto in produzione.
+
+    **Unico punto in cui questa composizione è scritta.** La usano il
+    `lifespan`, che lo avvia in background, e il provider dell'endpoint
+    amministrativo, che ne esegue una passata su richiesta. Prima esisteva
+    solo nel `lifespan`, e l'endpoint si costruiva il proprio percorso: il
+    risultato è che le autorizzazioni Stripe venivano rilasciate dal giro
+    automatico e **non** da quello manuale, in violazione silenziosa della
+    decisione #31.
+
+    Il gateway si risolve solo quando i pagamenti sono attivi, perché
+    `get_stripe_gateway` solleva se non lo sono — e un'applicazione senza
+    chiavi Stripe deve poter partire, in sviluppo e nei test. Senza gateway
+    lo sweeper non tocca le prenotazioni che hanno un'autorizzazione viva,
+    che è il comportamento prudente.
+
+    L'import è locale per la stessa ragione per cui lo era nel `lifespan`:
+    `payment_router` importa a sua volta il router pubblico, e tenere questa
+    dipendenza fuori dal tempo di import evita di legare l'ordine dei moduli
+    a una catena che non ha motivo di esistere.
+
+    :param email_service: canale email da usare; se omesso viene risolto al
+        momento dell'invio, così i test lo possono sostituire.
+    """
+    gateway: Optional[StripeGateway] = None
+
+    if settings.stripe_enabled:
+        from src.routers.payment_router import get_stripe_gateway
+
+        gateway = get_stripe_gateway()
+
+    return BookingExpirationService(
+        async_session_maker, email_service=email_service, gateway=gateway
+    )

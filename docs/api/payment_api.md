@@ -305,6 +305,22 @@ Per ogni prenotazione in attesa di pagamento con blocco scaduto:
 L'ultimo caso è la scelta prudente: uno slot invenduto per un'ora costa una
 notte, un incasso senza camera costa molto di più.
 
+**Vale per entrambi i modi di eseguirlo.** Lo sweeper si esegue in due modi —
+il ciclo in background (ogni `SWEEPER_INTERVAL_SECONDS`) e l'endpoint
+`POST /admin/bookings/sweep-expired` — e sono **la stessa passata**: entrambi
+chiamano `sweep_once`, e la composizione del servizio è unica
+(`build_expiration_service`, condivisa con il `lifespan`).
+
+> ⚠️ Non era così fino al 02/10/2026: l'endpoint amministrativo chiamava
+> direttamente `expire_pending`, saltando il rilascio. Poteva quindi liberare
+> uno slot con un'autorizzazione ancora viva. Nessun denaro andava perso — il
+> ricontrollo di §5.3 interveniva al momento del pagamento — ma l'ospite
+> vedeva un addebito riuscire e poi annullarsi, che è il caso che questo
+> intero disegno esiste per evitare. Era una svista di cablaggio: l'endpoint
+> è dello Step F, il rilascio è dello Step G ed era stato aggiunto solo al
+> giro automatico. Il presidio contro il ritorno è
+> `test_lo_sweeper_manuale_rilascia_l_autorizzazione`.
+
 ### A cosa serve davvero, in concreto
 
 Vale la pena essere precisi, perché la risposta intuitiva è sbagliata.
@@ -433,6 +449,7 @@ localhost:8000/api/v1/payments/webhook`.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 02/10/2026 | **—** | **Difetto: lo sweeper manuale non rilasciava le autorizzazioni.** `POST /admin/bookings/sweep-expired` esegue ora `sweep_once`, la stessa passata del giro automatico (§6) |
 | 28/09/2026 | **—** | **Nuovo esito `NOT_PAYABLE`**: un'autorizzazione su una prenotazione che non attende più il pagamento (annullata dal back-office durante il checkout) viene rilasciata invece di essere incassata |
 | 26/09/2026 | **—** | Intervallo dello sweeper 60 → 300 s · §6 spiega a cosa serve davvero il rilascio delle autorizzazioni (rendere non pagabile un checkout abbandonato, non sbloccare denaro) |
 | 20/09/2026 | **G** | Payment Intent a incasso differito · webhook firmato e idempotente · verifica dell'importo e dello slot prima dell'incasso · rilascio dell'autorizzazione se lo slot è perduto · sweeper che annulla le autorizzazioni prima di liberare · email `booking_slot_lost` |

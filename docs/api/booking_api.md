@@ -893,13 +893,21 @@ Se nel frattempo le camere sono state vendute a qualcun altro la proroga viene r
 
 **Codici**: `200` · `401` · `403`
 
-**Logica.** Porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto, disattiva le righe camera, invalida i token e scrive la traccia storica con attore `SYSTEM`. Le email partono **dopo** il commit, come nel giro automatico.
+**Logica.** Esegue **una passata completa dello sweeper** (`sweep_once`), identica a quella del giro automatico e nello stesso ordine:
+
+1. **rilascia le autorizzazioni Stripe** ancora vive sulle prenotazioni scadute; quelle che non si riesce a rilasciare restano fuori dalla passata;
+2. porta a `EXPIRED` le prenotazioni temporanee con blocco scaduto, disattiva le righe camera, invalida i token, scrive la traccia storica con attore `SYSTEM`;
+3. invia le email **dopo** il commit.
+
+> ⚠️ **Fino al 02/10/2026 il punto 1 non c'era.** Questo endpoint chiamava direttamente `expire_pending`, saltando il rilascio delle autorizzazioni: poteva quindi rimettere in vendita uno slot su cui esisteva ancora un'autorizzazione viva su Stripe — esattamente ciò che la decisione #31 vieta al giro automatico.
+>
+> Il sistema restava corretto, perché il ricontrollo nel webhook intercettava il caso (`payment_api.md` §5.3), ma l'ospite viveva un pagamento che sembrava riuscire e poi si annullava: l'esperienza che l'incasso differito esiste per evitare. Era una svista di cablaggio — l'endpoint è dello Step F, il rilascio delle autorizzazioni è arrivato con lo Step G ed è stato aggiunto solo a `sweep_once`. Ora l'endpoint **chiama `sweep_once`**, quindi le due vie non possono più divergere.
 
 **A cosa serve.** A collaudare il meccanismo senza restare quindici minuti a guardare l'orologio, e come leva operativa quando lo sweeper in background è spento (`SWEEPER_ENABLED=false`) perché lo si pilota da uno scheduler esterno.
 
 **Non è distruttivo.** Libera slot che il sistema considera già liberi, e rieseguirlo non cambia nulla: la seconda passata non trova più prenotazioni in attesa scadute.
 
-**Test**: `test_l_admin_puo_eseguire_lo_sweeper_a_mano`, `test_lo_sweeper_a_mano_e_idempotente`, `test_un_utente_semplice_non_puo_eseguire_lo_sweeper`, `test_senza_autenticazione_lo_sweeper_e_inaccessibile`.
+**Test**: `test_l_admin_puo_eseguire_lo_sweeper_a_mano`, `test_lo_sweeper_a_mano_e_idempotente`, `test_un_utente_semplice_non_puo_eseguire_lo_sweeper`, `test_senza_autenticazione_lo_sweeper_e_inaccessibile`, e in `test_payment_api.py` **`test_lo_sweeper_manuale_rilascia_l_autorizzazione`** — quest'ultimo è il presidio contro il ritorno del difetto, e verifica *che cosa è stato chiesto a Stripe*, non solo l'esito.
 
 ```bash
 curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
@@ -1332,6 +1340,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 02/10/2026 | **—** | **Difetto: `POST /admin/bookings/sweep-expired` non rilasciava le autorizzazioni Stripe** prima di liberare gli slot, a differenza del giro automatico (decisione #31). L'endpoint esegue ora `sweep_once`, la stessa passata; la composizione dello sweeper è unica (`build_expiration_service`), condivisa con il `lifespan` |
 | 01/10/2026 | **—** | `GET /admin/bookings/`: ordinamento `sort` (`CHECK_IN_DESC` · `CHECK_IN_ASC` · `CREATED_DESC`); la riga di elenco porta anche `guest_firstname`, `guest_count` e `room_names` |
 | 01/10/2026 | **—** | Cancellazione di una camera con prenotazioni: il messaggio ora dice «nemmeno se disattivata» e suggerisce di disattivarla per non riceverne di nuove. Il vecchio testo veniva letto come «disattivala e poi potrai eliminarla». Nuovo `tests/test_room_api.py` (3 test) |
 | 28/09/2026 | **—** | Riga di audit dell'incasso manuale spostata **dopo il commit** · email: «già saldato» e «importo già pagato» legati a `payment_status`, niente più «modificare» né «annulla» dove non è consentito, avviso di non rimborsabilità per `PAY_NOW`, termine scritto come «entro le 23:59 del giorno prima», «fino al» invece di «fino alle», chiusura distinta per l'annullamento della struttura · errori su elementi di lista nominano il campo (`room_ids`) invece dell'indice |
