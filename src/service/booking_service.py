@@ -87,6 +87,7 @@ from src.security.audit_logging import apply_audit_fields
 from src.security.booking_tokens import generate_booking_token, hash_booking_token
 from src.security.quote_token import QuotePayload
 from src.security.validators import today_in_app_timezone
+from src.service.bookable_rooms import load_bookable_rooms
 from src.service.pricing_service import PricingService
 from src.service.transaction import run_in_transaction
 
@@ -1842,18 +1843,7 @@ class BookingService:
             raise RoomNotAvailable(self._describe_conflicts(conflicts))
 
     async def _load_and_validate_rooms(self, room_ids: Sequence[UUID]) -> List[Room]:
-        rooms = await self.room_repository.get_all_by_ids(list(room_ids))
-
-        if len(rooms) != len(set(room_ids)):
-            raise EntityNotFound("Una o più camere selezionate non esistono")
-
-        disabled = [room.name for room in rooms if not room.enabled]
-        if disabled:
-            raise RoomNotAvailable(
-                f"Le seguenti camere non sono attualmente prenotabili: {', '.join(disabled)}"
-            )
-
-        return rooms
+        return await load_bookable_rooms(self.room_repository, room_ids)
 
     @staticmethod
     def _assert_capacity(rooms: Sequence[Room], guest_count: int) -> None:

@@ -7,10 +7,11 @@ proponendo le combinazioni utili. Filtrare a monte renderebbe impossibile
 prenotare due camere doppie per quattro persone, che in un B&B è il caso
 normale delle famiglie.
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from itertools import combinations
-from typing import List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from uuid import UUID
 
 from src.config.config import settings
 from src.data.model.room import Room
@@ -19,9 +20,11 @@ from src.data.repository.room_repository import RoomRepository
 from src.data.schemas.booking_schema import (
     AvailabilityResponseSchema,
     AvailableRoomSchema,
+    OccupancyResponseSchema,
     RoomCombinationSchema,
 )
 from src.data.schemas.room_service_schema import RoomServiceSchema
+from src.service.bookable_rooms import load_bookable_rooms
 from src.service.pricing_service import PricingService
 
 #: Oltre questa soglia di camere libere l'enumerazione esaustiva viene
@@ -79,6 +82,57 @@ class AvailabilityService:
             rooms=available,
             suggested_combinations=self.build_combinations(available, guest_count),
         )
+
+    async def occupancy(
+            self,
+            room_ids: Sequence[UUID],
+            date_from: date,
+            date_to: date
+    ) -> OccupancyResponseSchema:
+        """
+        Notti della finestra `[date_from, date_to)` in cui almeno una delle
+        camere indicate non è disponibile. Serve al calendario della modalità
+        «Per camera».
+
+        Usa la stessa definizione di "occupato" della ricerca per date
+        (`BookingRepository._occupying_item_conditions`), quindi le due strade
+        non possono contraddirsi. Le camere vengono verificate come alla
+        creazione: inesistente → `404`, disattivata → `409`.
+        """
+        await load_bookable_rooms(self.room_repository, room_ids)
+
+        intervals = await self.booking_repository.get_occupied_intervals(
+            list(room_ids), date_from, date_to
+        )
+
+        return OccupancyResponseSchema(
+            date_from=date_from,
+            date_to=date_to,
+            room_ids=list(room_ids),
+            unavailable_nights=sorted(self.expand_nights(intervals, date_from, date_to)),
+        )
+
+    @staticmethod
+    def expand_nights(
+            intervals: Iterable[Tuple[date, date]],
+            date_from: date,
+            date_to: date
+    ) -> Set[date]:
+        """
+        Notti occupate dagli intervalli, ritagliate sulla finestra.
+
+        Un soggiorno dal 12 al 14 occupa le notti del 12 e del 13: il 14 è il
+        giorno di partenza, e quella notte è libera. Le notti di più camere si
+        uniscono: basta che una sia occupata.
+        """
+        nights: Set[date] = set()
+        for check_in, check_out in intervals:
+            night = max(check_in, date_from)
+            last = min(check_out, date_to)
+            while night < last:
+                nights.add(night)
+                night += timedelta(days=1)
+        return nights
 
     def _to_available_schemas(
             self,

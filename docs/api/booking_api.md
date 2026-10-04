@@ -168,6 +168,7 @@ Finestra scorrevole: per ogni chiave si conservano gli istanti delle richieste r
 | Ambito | Limite | Finestra | Chiave |
 |:--|:--:|:--|:--|
 | `GET /availability` | 20 | 1 minuto | IP |
+| `GET /occupancy` | 20 | 1 minuto | IP |
 | `POST /quote` | 20 | 1 minuto | IP |
 | `POST /` (creazione) | 5 | 1 ora | IP |
 | `POST /` (creazione) | 3 | 24 ore | email |
@@ -332,6 +333,7 @@ Porta a `EXPIRED` le prenotazioni temporanee il cui blocco è scaduto. Parte con
 | # | Metodo | Rotta | Accesso | Rate limit | Captcha |
 |:-:|:--|:--|:--|:--|:--:|
 | 1 | `GET` | `/api/v1/bookings/availability` | Pubblico | 20/min IP | no |
+| **1b** | `GET` | `/api/v1/bookings/occupancy` | Pubblico | 20/min IP | no |
 | 2 | `POST` | `/api/v1/bookings/quote` | Pubblico | 20/min IP | no |
 | 3 | `POST` | `/api/v1/bookings/` | Pubblico | 5/h IP + 3/g email | **sì** |
 | 4 | `POST` | `/api/v1/bookings/confirm` | Pubblico | 10/h IP | no |
@@ -388,6 +390,56 @@ Porta a `EXPIRED` le prenotazioni temporanee il cui blocco è scaduto. Parte con
 
 ```bash
 curl -i "http://localhost:8000/api/v1/bookings/availability?check_in=2026-12-01&check_out=2026-12-03&guest_count=4"
+```
+
+---
+
+### 1b · `GET /api/v1/bookings/occupancy`
+
+**Notti non disponibili per un insieme di camere — il calendario della modalità «Per camera».**
+
+| | |
+|:--|:--|
+| **Accesso** | Pubblico (nessuna autenticazione) |
+| **Rate limit** | 20 richieste/minuto per IP |
+| **Query** | `room_ids` (UUID, obbligatorio, **da ripetere** per ogni camera: `?room_ids=…&room_ids=…`) · `date_from` (date, obbligatorio) · `date_to` (date, obbligatorio) |
+| **Risposta** | `OccupancyResponseSchema` |
+
+**Codici**: `200` · `404` camera inesistente · `409` camera disattivata · `422` parametri non validi · `429` limite superato
+
+**La finestra è `[date_from, date_to)`**: `date_from` inclusa, `date_to` **esclusa**, come arrivo e partenza. Novembre e dicembre si chiedono con `date_from=2026-11-01&date_to=2027-01-01`.
+
+**Si ragiona per notti.** La notte del giorno `d` è quella fra `d` e `d + 1`. Una prenotazione dal 12 al 14 occupa le notti del **12** e del **13**: il 14 l'ospite parte, e quel giorno un altro può arrivare. Per questo il 14 **non** compare fra le notti non disponibili.
+
+**Logica.** Verifica le camere come la creazione (`load_bookable_rooms`: inesistente → `404`, disattivata → `409`), legge gli intervalli delle righe camera che occupano la finestra, li ritaglia sulla finestra e li trasforma in notti. Una notte è non disponibile se **almeno una** delle camere richieste è occupata. La definizione di "occupato" è **la stessa** di `/availability` (`BookingRepository._occupying_item_conditions`): riga attiva, stato occupante, blocco temporaneo non scaduto. Le due letture non possono quindi contraddirsi — lo verifica `test_coerente_con_la_ricerca_per_date`.
+
+**Cosa non restituisce, di proposito.** Solo date, già unite fra le camere. Nessun codice, nome, durata, camera o stato delle singole prenotazioni: l'endpoint è pubblico e servirà anche alla prenotazione autonoma dell'ospite, a cui serve sapere *se* è libero, non *chi* occupa.
+
+**Vincoli** (`OccupancyRequestSchema`, `422` altrimenti):
+
+| Regola | Messaggio |
+|:--|:--|
+| da 1 a 5 camere, senza duplicati | «Devi selezionare almeno una camera» · «…ID duplicati» · «…più di 5 camere…» |
+| `date_to` > `date_from` | «La data finale deve essere successiva a quella iniziale» |
+| `date_from` ≥ oggi (fuso della struttura) | «Il periodo non può iniziare nel passato» |
+| finestra ≤ `occupancy_max_window_days` (**92**) giorni | «Il periodo richiesto non può superare 92 giorni» |
+| `date_to` ≤ oggi + 365 + 30 giorni (anticipo massimo più soggiorno massimo) | «Il periodo richiesto va oltre il limite di prenotazione» |
+
+Il limite di 92 giorni impedisce di scaricare l'occupazione di un anno intero con una richiesta sola. Il calendario ne chiede due mesi alla volta.
+
+**Test**: classe `TestOccupancy` in `test_occupancy_api.py` (18), `TestOccupancyRequest` in `test_booking_schema.py` (10), `TestExpandNights` in `test_availability_combinations.py` (4).
+
+```bash
+curl -i "http://localhost:8000/api/v1/bookings/occupancy?room_ids=<UUID1>&room_ids=<UUID2>&date_from=2026-11-01&date_to=2027-01-01"
+```
+
+```json
+{
+  "date_from": "2026-11-01",
+  "date_to": "2027-01-01",
+  "room_ids": ["<UUID1>", "<UUID2>"],
+  "unavailable_nights": ["2026-11-12", "2026-11-13", "2026-12-24"]
+}
 ```
 
 ---
@@ -924,6 +976,14 @@ curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
 
 ### 5.1 Richiesta
 
+#### `OccupancyRequestSchema`
+
+| Campo | Tipo | Obbl. | Vincoli |
+|:--|:--|:--:|:--|
+| `room_ids` | UUID[] | sì | non vuota, senza duplicati, max 5 |
+| `date_from` | date | sì | ≥ oggi |
+| `date_to` | date | sì | > `date_from`, finestra ≤ 92 giorni, ≤ oggi + 395 giorni |
+
 #### `BookingQuoteRequestSchema`
 
 | Campo | Tipo | Obbl. | Vincoli |
@@ -1010,6 +1070,14 @@ Solo il token, senza `reason`: qui non si cancella nulla. Schema separato da `Bo
 | `nights` · `subtotal` | int, decimal string | subtotale per l'intero soggiorno |
 | `services` | `RoomServiceSchema[]` | `{id, name}` |
 | `fits_all_guests` | bool | la camera da sola basta per gli ospiti |
+
+#### `OccupancyResponseSchema`
+
+| Campo | Tipo | Note |
+|:--|:--|:--|
+| `date_from` / `date_to` | date | la finestra richiesta, `date_to` esclusa |
+| `room_ids` | UUID[] | le camere richieste |
+| `unavailable_nights` | date[] | notti in cui almeno una camera è occupata, ordinate; vuota se tutto libero |
 
 #### `RoomCombinationSchema`
 
@@ -1154,9 +1222,10 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 
 | File | Test | Database | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_booking_schema.py` | 58 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
+| `test_booking_schema.py` | 68 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
-| `test_availability_combinations.py` | 11 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi |
+| `test_availability_combinations.py` | 15 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi; notti del calendario (giorno di partenza libero, unione, ritaglio) |
+| `test_occupancy_api.py` | 18 | sì | Calendario: notti occupate, giorno di partenza libero, unione fra camere, blocco scaduto, annullate e scadute, ritaglio sulla finestra, `404`/`409`/`422`/`429`, **coerenza con `/availability`** |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
 | `test_exception_handler.py` | 6 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste |
@@ -1196,6 +1265,16 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] `POST /` crea la prenotazione in `PENDING_CONFIRMATION` e restituisce il token
 - [ ] `POST /confirm` porta a `CONFIRMED`, azzera `hold_expires_at`, valorizza `cancellation_deadline`
 - [ ] `POST /lookup` con codice ed email restituisce la prenotazione
+
+### Calendario (`GET /occupancy`)
+
+- [ ] Camera senza prenotazioni nella finestra → `unavailable_nights: []`
+- [ ] Prenotazione confermata dal 12 al 14 → notti `12` e `13`, **non** il `14`
+- [ ] Due camere con prenotazioni in giorni diversi → l'unione delle notti
+- [ ] Prenotazione annullata → le sue notti spariscono
+- [ ] Finestra di 93 giorni → `422`; `date_from` ieri → `422`
+- [ ] Camera disattivata → `409`; UUID inventato → `404`
+- [ ] Senza cookie di sessione funziona lo stesso: è pubblico
 
 ### Flusso ospite — casi limite
 - [ ] Ripetere `POST /` sullo stesso slot → `409`
@@ -1340,6 +1419,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 03/10/2026 | **—** | **Nuovo `GET /bookings/occupancy`** (endpoint 1b): notti non disponibili per 1–5 camere in una finestra `[date_from, date_to)` di al massimo 92 giorni (`occupancy_max_window_days`), solo date unite, pubblico con rate limit. Serve al calendario del back-office (incremento 3b). La condizione di occupazione è ora un unico metodo del repository (`_occupying_item_conditions`), condiviso da disponibilità, conflitti e calendario; la verifica delle camere prenotabili è un unico helper (`src/service/bookable_rooms.py`), condiviso da creazione e calendario. +32 test |
 | 02/10/2026 | **—** | **Difetto: `POST /admin/bookings/sweep-expired` non rilasciava le autorizzazioni Stripe** prima di liberare gli slot, a differenza del giro automatico (decisione #31). L'endpoint esegue ora `sweep_once`, la stessa passata; la composizione dello sweeper è unica (`build_expiration_service`), condivisa con il `lifespan` |
 | 01/10/2026 | **—** | `GET /admin/bookings/`: ordinamento `sort` (`CHECK_IN_DESC` · `CHECK_IN_ASC` · `CREATED_DESC`); la riga di elenco porta anche `guest_firstname`, `guest_count` e `room_names` |
 | 01/10/2026 | **—** | Cancellazione di una camera con prenotazioni: il messaggio ora dice «nemmeno se disattivata» e suggerisce di disattivarla per non riceverne di nuove. Il vecchio testo veniva letto come «disattivala e poi potrai eliminarla». Nuovo `tests/test_room_api.py` (3 test) |

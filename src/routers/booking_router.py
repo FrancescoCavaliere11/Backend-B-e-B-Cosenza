@@ -47,6 +47,8 @@ from src.data.schemas.booking_schema import (
     BookingQuoteRequestSchema,
     BookingQuoteResponseSchema,
     GuestBookingCreateSchema,
+    OccupancyRequestSchema,
+    OccupancyResponseSchema,
     OwnBookingCancelSchema,
     UserBookingCreateSchema,
 )
@@ -60,6 +62,7 @@ from src.security.rate_limiter import (
     booking_lookup_rate_limit,
     client_ip,
     enforce_email_rate_limit,
+    occupancy_rate_limit,
     quote_rate_limit,
 )
 from src.service.availability_service import AvailabilityService
@@ -116,6 +119,27 @@ def get_availability_request(
         check_in=check_in,
         check_out=check_out,
         guest_count=guest_count,
+    )
+
+
+def get_occupancy_request(
+        room_ids: List[UUID] = Query(
+            ..., description="Camere da verificare (da 1 a 5): ripetere il parametro per ognuna"
+        ),
+        date_from: date = Query(..., description="Prima notte della finestra (YYYY-MM-DD), inclusa"),
+        date_to: date = Query(..., description="Fine della finestra (YYYY-MM-DD), esclusa"),
+) -> OccupancyRequestSchema:
+    """
+    Converte i parametri di query nello schema del calendario.
+
+    Come per `/availability`, `build_request_model` fa sì che un errore sui
+    parametri resti un `422` del client.
+    """
+    return build_request_model(
+        OccupancyRequestSchema,
+        room_ids=room_ids,
+        date_from=date_from,
+        date_to=date_to,
     )
 
 
@@ -203,6 +227,32 @@ async def get_availability(
         check_in=request.check_in,
         check_out=request.check_out,
         guest_count=request.guest_count,
+    )
+
+
+@booking_router.get(
+    "/occupancy",
+    response_model=OccupancyResponseSchema,
+    dependencies=[Depends(occupancy_rate_limit)],
+    summary="Notti non disponibili per un insieme di camere (calendario)",
+)
+async def get_occupancy(
+        request: Annotated[OccupancyRequestSchema, Depends(get_occupancy_request)],
+        service: Annotated[AvailabilityService, Depends(get_availability_service)],
+) -> OccupancyResponseSchema:
+    """
+    Serve al calendario della modalità «Per camera»: per le camere scelte,
+    le notti della finestra in cui **almeno una** non è disponibile.
+
+    Pubblico come `/availability`, perché servirà anche alla prenotazione
+    autonoma dell'ospite. Per questo restituisce solo date già unite —
+    nessun dato delle prenotazioni — e limita la finestra a
+    `occupancy_max_window_days` giorni.
+    """
+    return await service.occupancy(
+        room_ids=request.room_ids,
+        date_from=request.date_from,
+        date_to=request.date_to,
     )
 
 

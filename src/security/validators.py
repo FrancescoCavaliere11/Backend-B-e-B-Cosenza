@@ -164,6 +164,37 @@ def validate_booking_date_range(
         )
 
 
+def validate_occupancy_window(date_from: date, date_to: date) -> None:
+    """
+    Valida la finestra di una richiesta di occupazione (calendario).
+
+    La finestra è `[date_from, date_to)`, come arrivo e partenza: `date_to`
+    è esclusa. Vale solo da oggi in poi, al massimo per
+    `occupancy_max_window_days` giorni, e non oltre l'ultimo giorno in cui
+    potrebbe concludersi un soggiorno prenotabile oggi (anticipo massimo più
+    soggiorno massimo).
+
+    :raises ValueError: se una delle regole non è rispettata.
+    """
+    if date_to <= date_from:
+        raise ValueError("La data finale deve essere successiva a quella iniziale")
+
+    today = today_in_app_timezone()
+    if date_from < today:
+        raise ValueError("Il periodo non può iniziare nel passato")
+
+    if (date_to - date_from).days > settings.occupancy_max_window_days:
+        raise ValueError(
+            f"Il periodo richiesto non può superare {settings.occupancy_max_window_days} giorni"
+        )
+
+    last_bookable_day = today + timedelta(
+        days=settings.booking_max_advance_days + settings.booking_max_nights
+    )
+    if date_to > last_bookable_day:
+        raise ValueError("Il periodo richiesto va oltre il limite di prenotazione")
+
+
 def validate_room_ids_list(value: List[UUID]) -> List[UUID]:
     """
     Valida la lista delle camere richieste.

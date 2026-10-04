@@ -19,7 +19,7 @@ oggetto staccato che porta un `version` non aggiornato produce `StaleDataError`
 o, peggio, un aggiornamento perso. Il Service carica l'entità nella sessione,
 la modifica e lascia che sia il commit a persisterla.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple
 from uuid import UUID
 
@@ -202,6 +202,33 @@ class BookingRepository:
     # Disponibilità e concorrenza                                         #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _occupying_item_conditions(check_in, check_out) -> Tuple:
+        """
+        Condizioni per cui una riga camera **occupa** l'intervallo indicato.
+
+        Unica definizione di "occupato" per tutte le letture di disponibilità
+        — ricerca, conflitti, calendario — così non possono mai darsi torto a
+        vicenda. Una riga occupa quando:
+
+        * è attiva e si sovrappone all'intervallo (`[check_in, check_out)`);
+        * la prenotazione è in uno stato occupante;
+        * se lo stato è temporaneo, il blocco non è ancora scaduto: fra la
+          scadenza e il passaggio dello sweeper la riga è ancora `is_active`,
+          ma lo slot è di fatto libero.
+        """
+        now = datetime.now(timezone.utc)
+        return (
+            BookingRoomItem.is_active.is_(True),
+            BookingRoomItem.check_in < check_out,
+            BookingRoomItem.check_out > check_in,
+            Booking.status.in_(list(OCCUPYING_BOOKING_STATUSES)),
+            or_(
+                Booking.status.notin_(list(PENDING_BOOKING_STATUSES)),
+                Booking.hold_expires_at > now,
+            ),
+        )
+
     async def get_occupied_room_ids(
             self,
             check_in,
@@ -228,21 +255,10 @@ class BookingRepository:
         :param exclude_booking_id: prenotazione da ignorare, usata quando si
             modificano le date di una prenotazione esistente.
         """
-        now = datetime.now(timezone.utc)
-
         query = (
             select(BookingRoomItem.room_id)
             .join(Booking, Booking.id == BookingRoomItem.booking_id)
-            .where(
-                BookingRoomItem.is_active.is_(True),
-                BookingRoomItem.check_in < check_out,
-                BookingRoomItem.check_out > check_in,
-                Booking.status.in_(list(OCCUPYING_BOOKING_STATUSES)),
-                or_(
-                    Booking.status.notin_(list(PENDING_BOOKING_STATUSES)),
-                    Booking.hold_expires_at > now,
-                ),
-            )
+            .where(*self._occupying_item_conditions(check_in, check_out))
             .distinct()
         )
 
@@ -251,6 +267,35 @@ class BookingRepository:
 
         result = await self.session.execute(query)
         return list(result.scalars().all())
+
+    async def get_occupied_intervals(
+            self,
+            room_ids: List[UUID],
+            date_from: date,
+            date_to: date
+    ) -> List[Tuple[date, date]]:
+        """
+        Intervalli `(check_in, check_out)` delle righe camera che occupano la
+        finestra `[date_from, date_to)` per le camere indicate.
+
+        Restituisce solo le date: chi chiede (il calendario) deve sapere *quando*
+        è occupato, non *da chi*. Gli intervalli possono sporgere oltre la
+        finestra; il ritaglio spetta al Service.
+        """
+        if not room_ids:
+            return []
+
+        query = (
+            select(BookingRoomItem.check_in, BookingRoomItem.check_out)
+            .join(Booking, Booking.id == BookingRoomItem.booking_id)
+            .where(
+                BookingRoomItem.room_id.in_(room_ids),
+                *self._occupying_item_conditions(date_from, date_to),
+            )
+        )
+
+        result = await self.session.execute(query)
+        return [(row.check_in, row.check_out) for row in result.all()]
 
     async def get_active_overlapping_items(
             self,
@@ -267,22 +312,13 @@ class BookingRepository:
         if not room_ids:
             return []
 
-        now = datetime.now(timezone.utc)
-
         query = (
             select(BookingRoomItem)
             .join(Booking, Booking.id == BookingRoomItem.booking_id)
             .options(selectinload(BookingRoomItem.room))
             .where(
                 BookingRoomItem.room_id.in_(room_ids),
-                BookingRoomItem.is_active.is_(True),
-                BookingRoomItem.check_in < check_out,
-                BookingRoomItem.check_out > check_in,
-                Booking.status.in_(list(OCCUPYING_BOOKING_STATUSES)),
-                or_(
-                    Booking.status.notin_(list(PENDING_BOOKING_STATUSES)),
-                    Booking.hold_expires_at > now,
-                ),
+                *self._occupying_item_conditions(check_in, check_out),
             )
         )
 

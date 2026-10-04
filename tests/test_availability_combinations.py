@@ -3,6 +3,7 @@ Test della composizione delle proposte di soggiorno.
 
 `build_combinations` è una funzione pura: nessun database, nessuna sessione.
 """
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
@@ -123,3 +124,49 @@ class TestCombinations:
         for combination in result:
             assert combination.total_capacity >= 6
             assert combination.rooms_count <= 5
+
+
+class TestExpandNights:
+    """
+    `expand_nights` traduce gli intervalli occupati in notti del calendario.
+    Funzione pura: la regola "il giorno di partenza è libero" si verifica qui.
+    """
+
+    FROM = date(2026, 11, 1)
+    TO = date(2027, 1, 1)
+
+    def test_il_giorno_di_partenza_resta_libero(self):
+        nights = AvailabilityService.expand_nights(
+            [(date(2026, 11, 12), date(2026, 11, 14))], self.FROM, self.TO
+        )
+        assert nights == {date(2026, 11, 12), date(2026, 11, 13)}
+
+    def test_intervalli_di_piu_camere_si_uniscono(self):
+        nights = AvailabilityService.expand_nights(
+            [
+                (date(2026, 11, 12), date(2026, 11, 14)),
+                (date(2026, 11, 13), date(2026, 11, 15)),
+                (date(2026, 12, 24), date(2026, 12, 25)),
+            ],
+            self.FROM,
+            self.TO,
+        )
+        assert sorted(nights) == [
+            date(2026, 11, 12), date(2026, 11, 13), date(2026, 11, 14), date(2026, 12, 24),
+        ]
+
+    def test_gli_intervalli_vengono_ritagliati_sulla_finestra(self):
+        nights = AvailabilityService.expand_nights(
+            [
+                (date(2026, 10, 30), date(2026, 11, 2)),
+                (date(2026, 12, 30), date(2027, 1, 3)),
+            ],
+            self.FROM,
+            self.TO,
+        )
+        assert sorted(nights) == [
+            date(2026, 11, 1), date(2026, 12, 30), date(2026, 12, 31),
+        ]
+
+    def test_nessun_intervallo_nessuna_notte(self):
+        assert AvailabilityService.expand_nights([], self.FROM, self.TO) == set()

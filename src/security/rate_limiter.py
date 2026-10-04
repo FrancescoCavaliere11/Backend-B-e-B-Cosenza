@@ -182,6 +182,10 @@ quote_rate_limit = RateLimit(
     "quote", settings.rate_limit_availability_per_ip_minute, 60
 )
 
+occupancy_rate_limit = RateLimit(
+    "occupancy", settings.rate_limit_availability_per_ip_minute, 60
+)
+
 booking_create_rate_limit = RateLimit(
     "booking_create", settings.rate_limit_booking_create_per_ip_hour, 3_600
 )

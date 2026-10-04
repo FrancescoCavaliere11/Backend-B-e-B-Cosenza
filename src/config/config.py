@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     booking_max_nights: int = 30
     booking_max_advance_days: int = 365
     booking_max_rooms_per_booking: int = 5
+    #: Ampiezza massima, in giorni, della finestra di `GET /bookings/occupancy`.
+    #:
+    #: Il calendario ne chiede due mesi alla volta (al più 62 giorni): 92 è un
+    #: margine abbondante. Il limite esiste perché l'endpoint è pubblico, e
+    #: l'occupazione di un anno intero in una richiesta sola è un'informazione
+    #: commerciale della struttura, non un dato che serve a chi prenota.
+    occupancy_max_window_days: int = 92
     #: Prefisso del codice prenotazione leggibile (es. "BB-2026-000123").
     booking_code_prefix: str = "BB"
     #: Intervallo di esecuzione dello sweeper delle prenotazioni scadute.

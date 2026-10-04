@@ -40,6 +40,7 @@ from src.security.validators import (
     validate_guest_firstname,
     validate_guest_lastname,
     validate_honeypot,
+    validate_occupancy_window,
     validate_phone_number,
     validate_room_ids_list,
     validate_terms_accepted,
@@ -54,6 +55,47 @@ _MAX_GUEST_COUNT = 100
 # ===========================================================================
 # Disponibilità
 # ===========================================================================
+
+class OccupancyRequestSchema(CustomModel):
+    """
+    Notti occupate di alcune camere in una finestra di date (calendario).
+
+    La finestra è `[date_from, date_to)`: `date_to` è esclusa, come la data di
+    partenza di un soggiorno.
+    """
+
+    room_ids: List[UUID]
+    date_from: date
+    date_to: date
+
+    @field_validator("room_ids")
+    @classmethod
+    def validate_rooms(cls, value: List[UUID]) -> List[UUID]:
+        return validate_room_ids_list(value)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "OccupancyRequestSchema":
+        validate_occupancy_window(self.date_from, self.date_to)
+        return self
+
+
+class OccupancyResponseSchema(CustomModel):
+    """
+    Notti in cui **almeno una** delle camere richieste non è disponibile.
+
+    La notte del giorno `d` è quella fra `d` e `d + 1`: una notte occupata il 12
+    impedisce di dormire il 12, non di partire il 12.
+
+    Volutamente solo date, già unite fra le camere: nessun codice, nome,
+    durata o camera delle singole prenotazioni. L'endpoint è pubblico, e a
+    chi prenota serve sapere *se* è libero, non *chi* occupa.
+    """
+
+    date_from: date
+    date_to: date
+    room_ids: List[UUID]
+    unavailable_nights: List[date] = Field(default_factory=list)
+
 
 class AvailabilityRequestSchema(CustomModel):
     """Ricerca delle camere libere in un intervallo."""

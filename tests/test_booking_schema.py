@@ -34,6 +34,7 @@ from src.data.schemas.booking_schema import (
     BookingStatusUpdateSchema,
     GuestBookingCreateSchema,
     GuestDataSchema,
+    OccupancyRequestSchema,
 )
 from src.security.validators import today_in_app_timezone
 
@@ -151,6 +152,67 @@ class TestRoomSelection:
         schema = BookingQuoteRequestSchema(**_quote_payload())
         assert not hasattr(schema, "total_price")
         assert not hasattr(schema, "price")
+
+
+# ===========================================================================
+# Calendario: finestra di occupazione
+# ===========================================================================
+
+def _occupancy_payload(**overrides) -> dict:
+    payload = {
+        "room_ids": [uuid4()],
+        "date_from": TODAY,
+        "date_to": TODAY + timedelta(days=61),
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestOccupancyRequest:
+
+    def test_finestra_valida(self):
+        schema = OccupancyRequestSchema(**_occupancy_payload())
+        assert schema.date_from == TODAY
+
+    def test_finestra_della_massima_ampiezza_ammessa(self):
+        massima = settings.occupancy_max_window_days
+        OccupancyRequestSchema(**_occupancy_payload(date_to=TODAY + timedelta(days=massima)))
+
+    def test_finestra_troppo_ampia_rifiutata(self):
+        oltre = settings.occupancy_max_window_days + 1
+        with pytest.raises(ValidationError, match="non può superare"):
+            OccupancyRequestSchema(**_occupancy_payload(date_to=TODAY + timedelta(days=oltre)))
+
+    @pytest.mark.parametrize("giorni", [0, -1])
+    def test_data_finale_non_successiva_rifiutata(self, giorni):
+        with pytest.raises(ValidationError, match="successiva"):
+            OccupancyRequestSchema(**_occupancy_payload(date_to=TODAY + timedelta(days=giorni)))
+
+    def test_finestra_che_parte_nel_passato_rifiutata(self):
+        with pytest.raises(ValidationError, match="passato"):
+            OccupancyRequestSchema(**_occupancy_payload(date_from=TODAY - timedelta(days=1)))
+
+    def test_finestra_oltre_il_limite_di_prenotazione_rifiutata(self):
+        limite = settings.booking_max_advance_days + settings.booking_max_nights
+        date_to = TODAY + timedelta(days=limite + 1)
+        with pytest.raises(ValidationError, match="limite di prenotazione"):
+            OccupancyRequestSchema(
+                **_occupancy_payload(date_from=date_to - timedelta(days=30), date_to=date_to)
+            )
+
+    def test_nessuna_camera_rifiutata(self):
+        with pytest.raises(ValidationError, match="almeno una camera"):
+            OccupancyRequestSchema(**_occupancy_payload(room_ids=[]))
+
+    def test_camere_duplicate_rifiutate(self):
+        room_id = uuid4()
+        with pytest.raises(ValidationError, match="duplicati"):
+            OccupancyRequestSchema(**_occupancy_payload(room_ids=[room_id, room_id]))
+
+    def test_troppe_camere_rifiutate(self):
+        troppe = [uuid4() for _ in range(settings.booking_max_rooms_per_booking + 1)]
+        with pytest.raises(ValidationError, match="più di"):
+            OccupancyRequestSchema(**_occupancy_payload(room_ids=troppe))
 
 
 # ===========================================================================
