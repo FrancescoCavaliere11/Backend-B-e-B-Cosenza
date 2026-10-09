@@ -100,6 +100,7 @@ Il backend non espone mai stack trace. Ogni eccezione di dominio deriva da `AppE
 | `RoomNotAvailable` | 409 | Una o più camere non sono disponibili per le date richieste |
 | `InvalidBookingStatusTransition` | 409 | L'operazione non è consentita nello stato attuale |
 | `BookingNotCancellable` | 409 | La prenotazione non può più essere cancellata |
+| `StatusChangeReasonRequired` | 422 | Per questa operazione serve una motivazione *(es. partenza anticipata)* |
 | `BookingHoldExpired` | 410 | Il tempo per completare la prenotazione è scaduto |
 | `InvalidBookingToken` | 400 | Il link utilizzato non è valido o è già stato usato |
 | `InvalidDateRange` | 422 | L'intervallo di date indicato non è valido |
@@ -853,15 +854,19 @@ Il difetto non era nella rotta ma nel modello, che confonde il dovuto con l'inca
 | **Body** | `BookingStatusUpdateSchema` |
 | **Risposta** | `BookingSchema` |
 
-**Codici**: `200` · `401` · `403` · `404` · `409` transizione non ammessa o incoerente con le date · `422` motivazione mancante sull'annullamento
+**Codici**: `200` · `401` · `403` · `404` · `409` transizione non ammessa o incoerente con le date · `422` motivazione mancante sull'annullamento o sulla partenza anticipata
 
 **Logica.** Oltre alle transizioni della macchina a stati, valgono tre controlli temporali che intercettano i refusi più comuni del back-office:
 
 | Transizione | Vincolo |
 |:--|:--|
 | → `CHECKED_IN` | non prima della data di arrivo |
-| → `NO_SHOW` | non prima che l'ospite fosse atteso |
-| → `COMPLETED` | non prima della data di partenza |
+| → `NO_SHOW` | solo dal giorno **dopo** l'arrivo |
+| → `COMPLETED` | solo dal giorno **dopo** l'arrivo *(dal 07/10/2026; prima: non prima della partenza)* |
+
+**Partenza anticipata** *(dal 07/10/2026)*. Concludere prima della data di partenza è ammesso, ma con **motivazione obbligatoria** (`422` `StatusChangeReasonRequired`, *«Per concludere il soggiorno prima della data di partenza serve una motivazione»*): le notti rimaste restano **occupate e pagate**, ed è il caso che più facilmente genera una contestazione. Liberarle vorrebbe dire accorciare il soggiorno, cioè modificare la prenotazione (debito #21).
+
+**Mancata presentazione** *(dal 07/10/2026)*. `NO_SHOW` **libera le camere**, come un annullamento: nessuno le usa, e le notti rimaste si possono rivendere. Anche le notti passate tornano libere (nessuno vi ha dormito), così si può registrare a posteriori un ospite arrivato senza prenotazione. Le prenotazioni già segnate prima di questa data vengono allineate dalla migrazione `a7c3e91f5d20`.
 
 Due transizioni che la macchina a stati ammette sono **negate all'admin** *(dal 28/09/2026)*, perché appartengono a un altro attore:
 
@@ -872,9 +877,18 @@ Due transizioni che la macchina a stati ammette sono **negate all'admin** *(dal 
 
 L'annullamento libera **immediatamente** lo slot. Annullare una prenotazione `PENDING_PAYMENT` è sicuro anche se l'ospite è sulla pagina di pagamento: un'autorizzazione che arriva dopo viene **rilasciata** senza incasso (esito `NOT_PAYABLE`, vedi `payment_api.md`).
 
-**Email**: solo l'annullamento genera un messaggio (`booking_cancelled`). Le altre transizioni riguardano il funzionamento interno della struttura — arrivo, partenza, mancata presentazione — e l'ospite le conosce già perché era presente. Un annullamento deciso al banco, invece, potrebbe non saperlo affatto.
+**Email** *(dal 04/10/2026)* — due transizioni avvisano l'ospite:
 
-**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`, `test_scadenza_manuale_rifiutata`, `test_conferma_manuale_di_un_pagamento_online_rifiutata`, `test_conferma_manuale_di_una_attesa_email_consentita`.
+| Transizione | Messaggio | Perché |
+|:--|:--|:--|
+| → `CANCELLED` | `booking_cancelled` (*«annullata dalla struttura»*) | Un annullamento deciso al banco l'ospite potrebbe non saperlo |
+| `PENDING_CONFIRMATION` → `CONFIRMED` | `booking_confirmed` **con il link di gestione** | Come la conferma via email: è l'unico strumento con cui un ospite non registrato vede o annulla la prenotazione. Il vecchio link di conferma viene invalidato: chi lo apre dopo riceve `409` *«La prenotazione è già stata confermata»*, lo stesso messaggio del doppio clic. Se l'arrivo è già oggi o passato, il link non viene emesso (scadrebbe all'arrivo) e l'email parte senza |
+
+Arrivo, conclusione e mancata presentazione non mandano nulla: riguardano il funzionamento interno della struttura e l'ospite le conosce già perché era presente.
+
+**Risposta completa** *(dal 04/10/2026)* — `status_history` contiene anche la voce appena scritta. Prima la cronologia veniva restituita come era stata letta *prima* della transizione, e il client doveva rileggere il dettaglio. Vale per tutte le risposte `BookingSchema` dell'area admin (creazione, stato, incasso, proroga).
+
+**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`, `test_scadenza_manuale_rifiutata`, `test_conferma_manuale_di_un_pagamento_online_rifiutata`, `test_conferma_manuale_di_una_attesa_email_consentita`; classe `TestStatusResponseAndEmails` (6): cronologia nella risposta di creazione e di cambio stato, link di gestione funzionante dopo la conferma dell'admin, vecchio link di conferma che risponde «già confermata», nessun link per un soggiorno già iniziato, nessuna email su arrivo e conclusione. Classe `TestEarlyDepartureAndNoShow` (6): partenza anticipata con e senza motivazione, rifiutata il giorno dell'arrivo, notti rimaste ancora occupate; non presentato che libera le notti future e quelle passate.
 
 ---
 
@@ -1178,7 +1192,7 @@ Contenitore: `items[]`, `total`, `page`, `page_size`, `pages`.
 | `COMPLETED` | Soggiorno concluso | sì |
 | `CANCELLED` | Annullata *(terminale)* | no |
 | `EXPIRED` | Blocco scaduto senza conferma *(terminale)* | no |
-| `NO_SHOW` | Ospite non presentato *(terminale)* | sì |
+| `NO_SHOW` | Ospite non presentato *(terminale)* | **no** *(dal 07/10/2026)* |
 
 **Transizioni ammesse**
 
@@ -1229,7 +1243,7 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
 | `test_exception_handler.py` | 6 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste |
-| `test_admin_booking_api.py` | 43 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga** |
+| `test_admin_booking_api.py` | 55 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga**, cronologia nelle risposte, email della conferma dall'admin, **partenza anticipata e mancata presentazione** |
 | `test_room_api.py` | 3 | sì | Una camera con prenotazioni non si elimina, nemmeno se disattivata |
 | `test_email_service.py` | 36 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale, **testi coerenti con le regole**, formato dei termini |
 | `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
@@ -1303,6 +1317,9 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Check-in registrato prima della data di arrivo → `409`
 - [ ] Annullamento senza motivazione → `422`
 - [ ] Annullamento → lo slot torna immediatamente prenotabile
+- [ ] Conclusione prima della partenza senza motivazione → `422`; con motivazione → `200`, notti rimaste ancora occupate
+- [ ] Conclusione il giorno dell'arrivo → `409`
+- [ ] Non presentato → le notti tornano libere in `/occupancy` e si possono riprenotare
 - [ ] Registrazione incasso in contanti → `payment_status: PAID`
 - [ ] Incasso con `amount` nel body → `422` *«Il campo 'amount' non è previsto.»*
 - [ ] Incasso su prenotazione annullata → `409`; rimborso sulla stessa, se era pagata → `200`, metodo invariato
@@ -1419,6 +1436,8 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 07/10/2026 | **—** | `POST /admin/bookings/{id}/status`: **partenza anticipata** ammessa dal giorno dopo l'arrivo, con motivazione obbligatoria (nuova `StatusChangeReasonRequired`, `422`); le notti rimaste restano occupate. **`NO_SHOW` libera le camere** (fuori da `OCCUPYING_BOOKING_STATUSES`); migrazione dati `a7c3e91f5d20` per le prenotazioni già segnate. +6 test |
+| 04/10/2026 | **—** | `POST /admin/bookings/{id}/status`: la **conferma** dall'admin emette il link di gestione e manda `booking_confirmed` (prima l'ospite confermato al telefono restava senza link), e invalida il vecchio link di conferma. Le risposte `BookingSchema` dell'area admin includono la voce di cronologia appena scritta (`_to_admin_schema` ricarica `status_history`). +6 test |
 | 03/10/2026 | **—** | **Nuovo `GET /bookings/occupancy`** (endpoint 1b): notti non disponibili per 1–5 camere in una finestra `[date_from, date_to)` di al massimo 92 giorni (`occupancy_max_window_days`), solo date unite, pubblico con rate limit. Serve al calendario del back-office (incremento 3b). La condizione di occupazione è ora un unico metodo del repository (`_occupying_item_conditions`), condiviso da disponibilità, conflitti e calendario; la verifica delle camere prenotabili è un unico helper (`src/service/bookable_rooms.py`), condiviso da creazione e calendario. +32 test |
 | 02/10/2026 | **—** | **Difetto: `POST /admin/bookings/sweep-expired` non rilasciava le autorizzazioni Stripe** prima di liberare gli slot, a differenza del giro automatico (decisione #31). L'endpoint esegue ora `sweep_once`, la stessa passata; la composizione dello sweeper è unica (`build_expiration_service`), condivisa con il `lifespan` |
 | 01/10/2026 | **—** | `GET /admin/bookings/`: ordinamento `sort` (`CHECK_IN_DESC` · `CHECK_IN_ASC` · `CREATED_DESC`); la riga di elenco porta anche `guest_firstname`, `guest_count` e `room_names` |

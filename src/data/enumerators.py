@@ -60,13 +60,18 @@ PENDING_BOOKING_STATUSES: FrozenSet[BookingStatus] = frozenset({
 })
 
 #: Stati che rendono `BookingRoomItem.is_active = True` (slot occupato).
+#:
+#: `NO_SHOW` non c'è (dal 07/10/2026): l'ospite non si è presentato, quindi
+#: nessuno usa la camera e le notti rimaste devono poter essere rivendute.
+#: Liberare anche le notti passate è innocuo — nessuno vi ha soggiornato — e
+#: permette di registrarvi a posteriori un ospite arrivato senza prenotazione.
+#: `COMPLETED` invece resta: lì le notti sono state usate davvero.
 OCCUPYING_BOOKING_STATUSES: FrozenSet[BookingStatus] = frozenset({
     BookingStatus.PENDING_CONFIRMATION,
     BookingStatus.PENDING_PAYMENT,
     BookingStatus.CONFIRMED,
     BookingStatus.CHECKED_IN,
     BookingStatus.COMPLETED,
-    BookingStatus.NO_SHOW,
 })
 
 #: Stati terminali: nessuna transizione in uscita ammessa.

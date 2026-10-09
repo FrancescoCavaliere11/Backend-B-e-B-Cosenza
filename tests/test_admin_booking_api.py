@@ -612,3 +612,254 @@ class TestManualPayment:
 
         assert response.status_code == 409
         assert "Stripe" in response.json()["message"]
+
+
+# ===========================================================================
+# Cambi di stato: risposta completa ed email (incremento 4 del frontend)
+# ===========================================================================
+
+def _link_token(corpo: str, percorso: str) -> str:
+    """Token estratto dal link di una email, come farebbe l'ospite."""
+    import re
+    from urllib.parse import unquote
+
+    trovato = re.search(rf"{re.escape(percorso)}\?token=(\S+)", corpo)
+    assert trovato, f"Nessun link {percorso} nel messaggio:\n{corpo}"
+    return unquote(trovato.group(1))
+
+
+PAST_CHECK_IN = date.today() - timedelta(days=5)
+PAST_CHECK_OUT = date.today() - timedelta(days=3)
+
+
+class TestStatusResponseAndEmails:
+
+    async def test_la_risposta_di_creazione_contiene_la_voce_di_creazione(self, admin_client, rooms):
+        booking = await _create_booking(admin_client, [rooms[0].id])
+
+        storia = booking["status_history"]
+        assert len(storia) == 1
+        assert storia[0]["from_status"] is None
+        assert storia[0]["to_status"] == "CONFIRMED"
+        assert storia[0]["actor_type"] == "ADMIN"
+
+    async def test_la_risposta_del_cambio_di_stato_contiene_la_nuova_voce(self, admin_client, rooms):
+        booking = await _create_booking(admin_client, [rooms[0].id])
+
+        response = await admin_client.post(
+            f"{BASE}/{booking['id']}/status",
+            json={"new_status": "CANCELLED", "reason": "Richiesta dell'ospite"},
+        )
+
+        assert response.status_code == 200, response.text
+        storia = response.json()["status_history"]
+        assert [voce["to_status"] for voce in storia] == ["CONFIRMED", "CANCELLED"]
+        assert storia[-1]["from_status"] == "CONFIRMED"
+        assert storia[-1]["reason"] == "Richiesta dell'ospite"
+        assert storia[-1]["actor_type"] == "ADMIN"
+
+    async def test_la_conferma_dell_admin_manda_il_link_di_gestione(
+            self, admin_client, rooms, email_backend
+    ):
+        booking = await _create_booking(admin_client, [rooms[0].id], skip_email_confirmation=False)
+        assert booking["status"] == "PENDING_CONFIRMATION"
+        email_backend.clear()
+
+        response = await admin_client.post(
+            f"{BASE}/{booking['id']}/status", json={"new_status": "CONFIRMED"}
+        )
+
+        assert response.status_code == 200, response.text
+        messaggi = email_backend.sent_to(GUEST["email"])
+        assert len(messaggi) == 1, "Una conferma, un messaggio"
+        assert "confermata" in messaggi[0].subject.lower()
+
+        # Il link funziona davvero: l'ospite vede la propria prenotazione.
+        token = _link_token(messaggi[0].text_body, "/prenotazione/gestisci")
+        gestione = await admin_client.post(f"{PUBLIC}/manage", json={"token": token})
+        assert gestione.status_code == 200, gestione.text
+        assert gestione.json()["booking"]["status"] == "CONFIRMED"
+
+    async def test_dopo_la_conferma_dell_admin_il_link_di_conferma_dice_gia_confermata(
+            self, admin_client, rooms, email_backend
+    ):
+        """
+        Il link di conferma viene spento, e chi lo apre dopo riceve lo stesso
+        messaggio del doppio clic: «già confermata», che rassicura, invece di un
+        generico «link non valido», che lo farebbe dubitare della prenotazione.
+        """
+        email_backend.clear()
+        booking = await _create_booking(admin_client, [rooms[0].id], skip_email_confirmation=False)
+        token = _link_token(email_backend.last.text_body, "/prenotazione/conferma")
+
+        await admin_client.post(f"{BASE}/{booking['id']}/status", json={"new_status": "CONFIRMED"})
+        response = await admin_client.post(f"{PUBLIC}/confirm", json={"token": token})
+
+        assert response.status_code == 409
+        assert "già stata confermata" in response.json()["message"]
+
+    async def test_conferma_di_un_soggiorno_gia_iniziato_senza_link(
+            self, admin_client, rooms, email_backend
+    ):
+        """Il link scade all'arrivo: per un soggiorno passato non avrebbe senso mandarlo."""
+        booking = await _create_booking(
+            admin_client,
+            [rooms[0].id],
+            check_in=PAST_CHECK_IN.isoformat(),
+            check_out=PAST_CHECK_OUT.isoformat(),
+            skip_email_confirmation=False,
+        )
+        email_backend.clear()
+
+        response = await admin_client.post(
+            f"{BASE}/{booking['id']}/status", json={"new_status": "CONFIRMED"}
+        )
+
+        assert response.status_code == 200, response.text
+        messaggio = email_backend.last
+        assert "confermata" in messaggio.subject.lower()
+        assert "/prenotazione/gestisci?token=" not in messaggio.text_body
+
+    async def test_arrivo_e_conclusione_non_mandano_email(self, admin_client, rooms, email_backend):
+        booking = await _create_booking(
+            admin_client,
+            [rooms[0].id],
+            check_in=PAST_CHECK_IN.isoformat(),
+            check_out=PAST_CHECK_OUT.isoformat(),
+        )
+        email_backend.clear()
+
+        for stato in ("CHECKED_IN", "COMPLETED"):
+            response = await admin_client.post(
+                f"{BASE}/{booking['id']}/status", json={"new_status": stato}
+            )
+            assert response.status_code == 200, response.text
+
+        assert email_backend.messages == []
+        assert [voce["to_status"] for voce in response.json()["status_history"]] == [
+            "CONFIRMED", "CHECKED_IN", "COMPLETED",
+        ]
+
+
+# ===========================================================================
+# Partenza anticipata e mancata presentazione (07/10/2026)
+# ===========================================================================
+
+TODAY = date.today()
+#: Soggiorno in corso: arrivato da due giorni, parte fra due.
+ONGOING_CHECK_IN = TODAY - timedelta(days=2)
+ONGOING_CHECK_OUT = TODAY + timedelta(days=2)
+
+
+async def _ongoing_booking(admin_client, room_id, **overrides) -> dict:
+    return await _create_booking(
+        admin_client,
+        [room_id],
+        check_in=overrides.pop("check_in", ONGOING_CHECK_IN).isoformat(),
+        check_out=overrides.pop("check_out", ONGOING_CHECK_OUT).isoformat(),
+        **overrides,
+    )
+
+
+async def _status(admin_client, booking_id, new_status, reason=None):
+    body = {"new_status": new_status}
+    if reason is not None:
+        body["reason"] = reason
+    return await admin_client.post(f"{BASE}/{booking_id}/status", json=body)
+
+
+class TestEarlyDepartureAndNoShow:
+
+    async def test_conclusione_anticipata_con_motivazione_consentita(self, admin_client, rooms):
+        booking = await _ongoing_booking(admin_client, rooms[0].id)
+        assert (await _status(admin_client, booking["id"], "CHECKED_IN")).status_code == 200
+
+        response = await _status(admin_client, booking["id"], "COMPLETED", "Partito prima per lavoro")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "COMPLETED"
+        assert response.json()["status_history"][-1]["reason"] == "Partito prima per lavoro"
+
+    async def test_conclusione_anticipata_senza_motivazione_rifiutata(self, admin_client, rooms):
+        booking = await _ongoing_booking(admin_client, rooms[0].id)
+        await _status(admin_client, booking["id"], "CHECKED_IN")
+
+        for reason in (None, "   "):
+            response = await _status(admin_client, booking["id"], "COMPLETED", reason)
+            assert response.status_code == 422
+            assert "prima della data di partenza" in response.json()["message"]
+
+        dettaglio = await admin_client.get(f"{BASE}/{booking['id']}")
+        assert dettaglio.json()["status"] == "CHECKED_IN"
+
+    async def test_conclusione_il_giorno_dell_arrivo_rifiutata(self, admin_client, rooms):
+        booking = await _ongoing_booking(admin_client, rooms[0].id, check_in=TODAY)
+        await _status(admin_client, booking["id"], "CHECKED_IN")
+
+        response = await _status(admin_client, booking["id"], "COMPLETED", "Ripensamento")
+
+        assert response.status_code == 409
+        assert "dal giorno dopo l'arrivo" in response.json()["message"]
+
+    async def test_partenza_anticipata_tiene_occupate_le_notti_rimaste(self, admin_client, rooms):
+        """Le notti rimaste restano pagate e occupate: liberarle è una modifica (debito #21)."""
+        booking = await _ongoing_booking(admin_client, rooms[0].id)
+        await _status(admin_client, booking["id"], "CHECKED_IN")
+        await _status(admin_client, booking["id"], "COMPLETED", "Partito prima")
+
+        nuova = await admin_client.post(
+            BASE + "/",
+            json=_create_payload(
+                [rooms[0].id],
+                check_in=TODAY.isoformat(),
+                check_out=ONGOING_CHECK_OUT.isoformat(),
+                guest={**GUEST, "email": "subentro@example.com"},
+            ),
+        )
+        assert nuova.status_code == 409
+
+    async def test_non_presentato_libera_le_camere(self, admin_client, rooms):
+        booking = await _ongoing_booking(admin_client, rooms[0].id)
+
+        response = await _status(admin_client, booking["id"], "NO_SHOW")
+        assert response.status_code == 200, response.text
+
+        # Il calendario non le mostra più occupate...
+        occupazione = await admin_client.get(
+            f"{PUBLIC}/occupancy",
+            params={
+                "room_ids": str(rooms[0].id),
+                "date_from": TODAY.isoformat(),
+                "date_to": (ONGOING_CHECK_OUT + timedelta(days=1)).isoformat(),
+            },
+        )
+        assert occupazione.status_code == 200, occupazione.text
+        assert occupazione.json()["unavailable_nights"] == []
+
+        # ...e le notti rimaste si possono rivendere.
+        nuova = await admin_client.post(
+            BASE + "/",
+            json=_create_payload(
+                [rooms[0].id],
+                check_in=TODAY.isoformat(),
+                check_out=ONGOING_CHECK_OUT.isoformat(),
+                guest={**GUEST, "email": "subentro@example.com"},
+            ),
+        )
+        assert nuova.status_code == 201, nuova.text
+
+    async def test_non_presentato_libera_anche_le_notti_passate(self, admin_client, rooms):
+        """Nessuno vi ha dormito: si può registrare a posteriori un ospite senza prenotazione."""
+        booking = await _ongoing_booking(admin_client, rooms[0].id)
+        await _status(admin_client, booking["id"], "NO_SHOW")
+
+        walk_in = await admin_client.post(
+            BASE + "/",
+            json=_create_payload(
+                [rooms[0].id],
+                check_in=ONGOING_CHECK_IN.isoformat(),
+                check_out=TODAY.isoformat(),
+                guest={**GUEST, "email": "walkin@example.com"},
+            ),
+        )
+        assert walk_in.status_code == 201, walk_in.text

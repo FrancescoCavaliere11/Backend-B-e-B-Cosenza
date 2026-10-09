@@ -82,6 +82,7 @@ from src.exception.custom_exception import (
     PaymentRequired,
     RateLimitExceeded,
     RoomNotAvailable,
+    StatusChangeReasonRequired,
 )
 from src.security.audit_logging import apply_audit_fields
 from src.security.booking_tokens import generate_booking_token, hash_booking_token
@@ -815,7 +816,16 @@ class BookingService:
             booking_id: UUID,
             payload: BookingStatusUpdateSchema,
             admin_id: UUID
-    ) -> BookingSchema:
+    ) -> BookingCreationResult:
+        """
+        Transizione di stato disposta dal back-office.
+
+        Sulla **conferma** emette anche il link di gestione, come la conferma
+        dell'ospite via email: è l'unico strumento con cui un ospite non
+        registrato vede o annulla la propria prenotazione, e chi viene
+        confermato al telefono non lo riceverebbe in nessun altro modo.
+        Il link torna in chiaro solo dentro il risultato, per l'email.
+        """
         return await self._in_transaction(
             lambda: self._execute_admin_change_status(booking_id, payload, admin_id)
         )
@@ -825,7 +835,7 @@ class BookingService:
             booking_id: UUID,
             payload: BookingStatusUpdateSchema,
             admin_id: UUID
-    ) -> BookingSchema:
+    ) -> BookingCreationResult:
         booking = await self.booking_repository.get_by_id(
             booking_id, with_items=True, with_history=True
         )
@@ -834,8 +844,10 @@ class BookingService:
 
         self._assert_admin_transition(booking, payload.new_status)
         self._assert_status_change_is_coherent(booking, payload.new_status)
+        self._assert_reason_when_required(booking, payload)
 
         now = datetime.now(timezone.utc)
+        manage_token: Optional[str] = None
         self._apply_transition(
             booking,
             payload.new_status,
@@ -851,6 +863,15 @@ class BookingService:
                 booking.check_in, booking.payment_option
             )
             self._sync_items_active_flag(booking)
+            # Il link di conferma ricevuto dall'ospite non serve più: spenderlo
+            # ora darebbe solo un errore. Al suo posto, il link di gestione.
+            await self.token_repository.invalidate_all_for_booking(
+                booking.id, BookingTokenPurpose.CONFIRM_EMAIL
+            )
+            # Il link scade all'arrivo: per un soggiorno già iniziato (inserito a
+            # posteriori) sarebbe morto prima di arrivare nella casella.
+            if booking.check_in > today_in_app_timezone():
+                manage_token = self._issue_manage_token(booking)
         elif payload.new_status == BookingStatus.CANCELLED:
             booking.cancelled_at = now
             booking.cancellation_reason = payload.reason
@@ -862,7 +883,10 @@ class BookingService:
 
         apply_audit_fields(audit=booking, user_id=admin_id)
         await self.booking_repository.flush()
-        return await self._to_admin_schema(booking)
+        return BookingCreationResult(
+            booking=await self._to_admin_schema(booking),
+            manage_token=manage_token,
+        )
 
     async def admin_register_payment(
             self,
@@ -1715,9 +1739,30 @@ class BookingService:
                 "La mancata presentazione può essere registrata solo dopo la data di arrivo"
             )
 
-        if new_status == BookingStatus.COMPLETED and today < booking.check_out:
+        # Una partenza anticipata è ammessa (dal 07/10/2026), ma non il giorno
+        # stesso dell'arrivo: almeno una notte deve essere stata passata.
+        if new_status == BookingStatus.COMPLETED and today <= booking.check_in:
             raise InvalidBookingStatusTransition(
-                "Il soggiorno non può risultare concluso prima della data di partenza"
+                "Il soggiorno può risultare concluso solo dal giorno dopo l'arrivo"
+            )
+
+    @staticmethod
+    def _assert_reason_when_required(booking: Booking, payload: BookingStatusUpdateSchema) -> None:
+        """
+        Motivazione obbligatoria per la **partenza anticipata**: le notti
+        rimaste restano occupate e pagate, ed è il caso che più facilmente
+        genera una contestazione. Serve una traccia del perché.
+
+        Non sta nello schema, che non conosce le date della prenotazione;
+        l'obbligo per l'annullamento invece sì (`BookingStatusUpdateSchema`).
+        """
+        is_early_departure = (
+            payload.new_status == BookingStatus.COMPLETED
+            and today_in_app_timezone() < booking.check_out
+        )
+        if is_early_departure and not (payload.reason or "").strip():
+            raise StatusChangeReasonRequired(
+                "Per concludere il soggiorno prima della data di partenza serve una motivazione"
             )
 
     @staticmethod
@@ -2022,7 +2067,11 @@ class BookingService:
 
         `_to_public_schema` non ha questo problema: non espone campi di audit.
         """
-        await self.session.refresh(booking, ["created_at", "updated_at"])
+        # La cronologia si ricarica insieme alle date: chi ha appena cambiato
+        # stato (o creato la prenotazione) deve vedere nella risposta anche la
+        # voce appena scritta, che la relazione già caricata non conosce.
+        # Senza, la risposta era incompleta e il client doveva rileggere.
+        await self.session.refresh(booking, ["created_at", "updated_at", "status_history"])
 
         history: List[BookingStatusHistorySchema] = []
         if "status_history" in booking.__dict__:

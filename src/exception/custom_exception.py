@@ -97,6 +97,16 @@ class InvalidBookingStatusTransition(AppException):
     default_message = "L'operazione non è consentita nello stato attuale della prenotazione"
 
 
+class StatusChangeReasonRequired(AppException):
+    """
+    Cambio di stato che richiede una motivazione, in un caso che lo schema non
+    può riconoscere da solo perché dipende dalla prenotazione (es. la
+    conclusione di un soggiorno prima della data di partenza).
+    """
+    status_code = 422
+    default_message = "Per questa operazione serve una motivazione"
+
+
 class BookingNotCancellable(AppException):
     """
     La prenotazione non è più cancellabile dall'ospite.

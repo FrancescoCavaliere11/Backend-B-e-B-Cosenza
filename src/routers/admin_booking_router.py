@@ -220,18 +220,25 @@ async def change_status(
 
     La motivazione è obbligatoria per l'annullamento.
 
-    **L'annullamento avvisa l'ospite.** È l'unica transizione che genera una
-    email: le altre riguardano il funzionamento interno della struttura
-    (arrivo, partenza, mancata presentazione) e l'ospite le conosce già perché
-    era presente. Un annullamento deciso al banco, invece, lui potrebbe non
-    saperlo affatto.
+    **Due transizioni avvisano l'ospite**, le altre no:
+
+    * l'**annullamento**: deciso al banco, l'ospite potrebbe non saperlo;
+    * la **conferma**: riceve il riepilogo con il **link di gestione**, come
+      quando conferma da sé via email. Senza, chi viene confermato al telefono
+      non avrebbe modo di vedere o annullare la prenotazione.
+
+    Arrivo, conclusione e mancata presentazione riguardano il funzionamento
+    interno della struttura, e l'ospite le conosce già perché era presente.
     """
-    booking = await service.admin_change_status(booking_id, payload, current_user.id)
+    result = await service.admin_change_status(booking_id, payload, current_user.id)
+    booking = result.booking
+    email_service = get_email_service()
 
     if booking.status == BookingStatus.CANCELLED:
-        background.add_task(
-            get_email_service().send_booking_cancelled, booking, by_structure=True
-        )
+        background.add_task(email_service.send_booking_cancelled, booking, by_structure=True)
+    elif booking.status == BookingStatus.CONFIRMED:
+        # Il link manca solo per un soggiorno già iniziato: il riepilogo parte comunque.
+        background.add_task(email_service.send_booking_confirmed, booking, result.manage_token)
 
     return booking
 
