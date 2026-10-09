@@ -648,3 +648,56 @@ async def test_lo_sweeper_manuale_rilascia_l_autorizzazione(
 
     aggiornata = await _ricarica(session, booking["code"])
     assert aggiornata.status == BookingStatus.EXPIRED
+
+
+# ===========================================================================
+# Storico dei pagamenti (incremento 5 del frontend)
+# ===========================================================================
+
+async def test_il_pagamento_online_lascia_le_sue_voci_nello_storico(
+        api_client, admin_client, rooms, stripe_gateway
+):
+    """Autorizzazione e incasso di Stripe compaiono nella scheda admin, con attore Sistema."""
+    prenotazione = await _crea_prenotazione_da_pagare(api_client, rooms[0].id)
+    await _avvia_pagamento(api_client, prenotazione["code"])
+    intent_id = list(stripe_gateway.intents)[0]
+    stripe_gateway.authorize(intent_id)
+
+    response = await _notifica(
+        api_client,
+        _evento("payment_intent.amount_capturable_updated", _intent_autorizzato(intent_id)),
+    )
+    assert response.json()["outcome"] == "CONFIRMED"
+
+    elenco = await admin_client.get(
+        "/api/v1/admin/bookings/", params={"code": prenotazione["code"]}
+    )
+    scheda = await admin_client.get(f"/api/v1/admin/bookings/{elenco.json()['items'][0]['id']}")
+    storico = scheda.json()["payment_history"]
+
+    assert [voce["to_status"] for voce in storico] == ["AUTHORIZED", "PAID"]
+    assert {voce["actor_type"] for voce in storico} == {"SYSTEM"}
+    assert all("actor_id" not in voce for voce in storico)
+
+
+async def test_lo_stesso_rimborso_notificato_due_volte_lascia_una_voce(
+        api_client, admin_client, rooms, stripe_gateway
+):
+    """Stripe ripete i webhook: un evento che non cambia nulla non lascia una seconda voce."""
+    prenotazione = await _crea_prenotazione_da_pagare(api_client, rooms[0].id)
+    await _avvia_pagamento(api_client, prenotazione["code"])
+    intent_id = list(stripe_gateway.intents)[0]
+
+    for event_id in ("evt_rimborso_1", "evt_rimborso_2"):
+        await _notifica(
+            api_client,
+            _evento("charge.refunded", {"id": "ch_1", "payment_intent": intent_id}, event_id),
+        )
+
+    elenco = await admin_client.get(
+        "/api/v1/admin/bookings/", params={"code": prenotazione["code"]}
+    )
+    scheda = await admin_client.get(f"/api/v1/admin/bookings/{elenco.json()['items'][0]['id']}")
+    rimborsi = [v for v in scheda.json()["payment_history"] if v["to_status"] == "REFUNDED"]
+    assert len(rimborsi) == 1
+    assert rimborsi[0]["reason"] == "Rimborso emesso su Stripe"

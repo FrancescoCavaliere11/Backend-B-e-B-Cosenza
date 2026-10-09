@@ -31,8 +31,6 @@ from src.config.database_config import get_async_session
 from src.data.enumerators import BookingStatus
 from src.data.model.user import User
 from src.data.repository.booking_repository import BookingRepository
-from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
-from src.data.repository.booking_token_repository import BookingTokenRepository
 from src.data.repository.room_repository import RoomRepository
 from src.data.schemas.booking_schema import (
     AvailabilityRequestSchema,
@@ -66,7 +64,7 @@ from src.security.rate_limiter import (
     quote_rate_limit,
 )
 from src.service.availability_service import AvailabilityService
-from src.service.booking_service import BookingCreationResult, BookingService
+from src.service.booking_service import BookingCreationResult, BookingService, build_booking_service
 from src.service.email.email_service import get_email_service
 from src.service.pricing_service import PricingService
 
@@ -78,14 +76,7 @@ booking_router = APIRouter(prefix="/api/v1/bookings", tags=["Booking"])
 # --------------------------------------------------------------------------- #
 
 async def get_booking_service(db: AsyncSession = Depends(get_async_session)) -> BookingService:
-    return BookingService(
-        session=db,
-        booking_repository=BookingRepository(db),
-        booking_token_repository=BookingTokenRepository(db),
-        booking_status_history_repository=BookingStatusHistoryRepository(db),
-        room_repository=RoomRepository(db),
-        pricing_service=PricingService(),
-    )
+    return build_booking_service(db)
 
 
 async def get_availability_service(

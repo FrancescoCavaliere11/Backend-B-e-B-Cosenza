@@ -51,6 +51,12 @@ from src.security.validators import (
 #: selezionate") richiede i dati delle camere e vive nel Service.
 _MAX_GUEST_COUNT = 100
 
+#: Lunghezza massima della motivazione di un'operazione sul pagamento: la
+#: stessa delle transizioni di stato (`BookingStatusUpdateSchema.reason`).
+_PAYMENT_REASON_MAX_LENGTH = 500
+#: Operazioni manuali sul pagamento che richiedono una motivazione.
+_PAYMENT_STATUSES_REQUIRING_REASON = frozenset({PaymentStatus.REFUNDED, PaymentStatus.PENDING})
+
 
 # ===========================================================================
 # Disponibilità
@@ -508,6 +514,18 @@ class AdminPaymentRegistrationSchema(CustomModel):
 
     payment_status: PaymentStatus
     payment_method: Optional[PaymentMethod] = None
+    #: Finisce nella cronologia dei pagamenti. Obbligatoria per rimborso e
+    #: correzione (`validate_reason`): sono le operazioni che tolgono un
+    #: incasso, e senza una traccia del perché non si ricostruiscono.
+    reason: Optional[str] = Field(default=None, max_length=_PAYMENT_REASON_MAX_LENGTH)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: Optional[str]) -> Optional[str]:
+        # Spazi ai bordi tolti, e una motivazione fatta solo di spazi vale assente.
+        if value is None:
+            return None
+        return value.strip() or None
 
     @field_validator("payment_status")
     @classmethod
@@ -529,6 +547,12 @@ class AdminPaymentRegistrationSchema(CustomModel):
     def validate_method_required(self) -> "AdminPaymentRegistrationSchema":
         if self.payment_status == PaymentStatus.PAID and self.payment_method is None:
             raise ValueError("Indica il metodo con cui l'ospite ha pagato")
+        return self
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> "AdminPaymentRegistrationSchema":
+        if self.payment_status in _PAYMENT_STATUSES_REQUIRING_REASON and self.reason is None:
+            raise ValueError("La motivazione è obbligatoria per un rimborso o una correzione")
         return self
 
 
@@ -553,6 +577,24 @@ class BookingRoomItemSchema(CustomModel):
     nights: int
     unit_price: Decimal
     line_total: Decimal
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BookingPaymentHistorySchema(CustomModel):
+    """
+    Voce della timeline del pagamento.
+
+    Come per lo storico degli stati, `actor_id` è escluso: identifica un
+    operatore interno. Non c'è un importo (debito #21).
+    """
+
+    from_status: Optional[PaymentStatus]
+    to_status: PaymentStatus
+    payment_method: Optional[PaymentMethod]
+    actor_type: AuditActorType
+    reason: Optional[str]
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -705,6 +747,7 @@ class BookingSchema(CustomModel):
     version: int
 
     status_history: List[BookingStatusHistorySchema] = Field(default_factory=list)
+    payment_history: List[BookingPaymentHistorySchema] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

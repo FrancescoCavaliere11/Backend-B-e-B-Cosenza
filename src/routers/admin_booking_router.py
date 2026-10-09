@@ -255,7 +255,12 @@ async def register_payment(
         service: Annotated[BookingService, Depends(get_booking_service)],
 ) -> BookingSchema:
     """
-    Per gli incassi in struttura: contanti, POS, bonifico.
+    Per gli incassi in struttura: contanti, POS, bonifico. Registra anche il
+    **rimborso** e la **correzione** di un incasso registrato per errore, che
+    richiedono una motivazione.
+
+    Ogni operazione riuscita lascia una voce in `payment_history` (chi, quando,
+    metodo, motivazione), già presente nella risposta.
 
     I pagamenti online passano invece dal webhook Stripe (Step G) e non vanno
     registrati da qui.

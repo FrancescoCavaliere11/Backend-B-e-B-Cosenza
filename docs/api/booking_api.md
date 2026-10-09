@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step A → G
+Versione API `v1` · Documento aggiornato al **9 ottobre 2026** · Copertura: Step A → G
 
 > I pagamenti online hanno un documento proprio: `payment_api.md`.
 
@@ -112,6 +112,9 @@ Il backend non espone mai stack trace. Ogni eccezione di dominio deriva da `AppE
 | `RateLimitExceeded` | 429 | Troppe richieste: riprova più tardi |
 | `InvalidFileType` / `InvalidFileSize` | 422 | — |
 | `StaleDataError` *(SQLAlchemy)* | 409 | Il dato è stato modificato da un'altra operazione |
+| `IntegrityError` *(SQLAlchemy)* — sovrapposizione di notti (`23P01`) | 409 | Una o più camere non sono disponibili per le date richieste *(dal 09/10/2026)* |
+| `IntegrityError` — valore duplicato (`23505`) o riferimento mancante (`23503`) | 409 | L'operazione è in conflitto con dati già presenti. Ricarica la pagina e riprova. *(dal 09/10/2026)* |
+| `IntegrityError` — ogni altro vincolo | **500** | Errore interno del server *(dal 09/10/2026)* |
 | `RequestValidationError` *(FastAPI)* | 422 | Dipende dal campo, con `details` |
 | `ValidationError` *(Pydantic, altrove)* · `ResponseValidationError` | **500** | Errore interno del server — dettaglio solo nei log |
 
@@ -263,6 +266,8 @@ C'è un test che lo verifica, così l'affordance si spegne da sé senza che ness
 **File**: `src/exception/exception_handler.py`
 
 Un **unico handler** registrato su `AppException` copre tutte le eccezioni di dominio, presenti e future: Starlette risolve percorrendo l'MRO dell'eccezione. Aggiungere un nuovo errore richiede una sola classe, non anche un handler.
+
+**Violazioni di vincolo del database** *(dal 09/10/2026)*. Un handler su `IntegrityError` fa da rete di sicurezza per i percorsi che non traducono la violazione in un errore di dominio. Il riconoscimento (codice SQLSTATE) è in un modulo unico, `src/data/integrity_errors.py`, usato anche dai Service. Le violazioni dovute allo stato dei dati (sovrapposizione, duplicato, riferimento mancante) sono conflitti `409`; le altre sono bug del server, `500`. Il messaggio originale dell'errore **non viene mai restituito né registrato**: contiene l'istruzione SQL e i suoi parametri, cioè i dati dell'ospite. Nei log finiscono solo SQLSTATE, metodo e percorso.
 
 Correzione importante introdotta allo Step B: gli errori di validazione producevano un `500` invece di un `422`, perché Pydantic v2 inserisce l'**oggetto eccezione vivo** nella chiave `ctx` e `json.dumps` non sa serializzarlo. Ora il contenuto di `ctx` viene convertito in stringa e le chiavi `input` e `url` rimosse.
 
@@ -854,7 +859,7 @@ Il difetto non era nella rotta ma nel modello, che confonde il dovuto con l'inca
 | **Body** | `BookingStatusUpdateSchema` |
 | **Risposta** | `BookingSchema` |
 
-**Codici**: `200` · `401` · `403` · `404` · `409` transizione non ammessa o incoerente con le date · `422` motivazione mancante sull'annullamento o sulla partenza anticipata
+**Codici**: `200` · `401` · `403` · `404` · `409` transizione non ammessa o incoerente con le date, oppure camere rivendute (vedi sotto) · `422` motivazione mancante sull'annullamento o sulla partenza anticipata
 
 **Logica.** Oltre alle transizioni della macchina a stati, valgono tre controlli temporali che intercettano i refusi più comuni del back-office:
 
@@ -875,6 +880,8 @@ Due transizioni che la macchina a stati ammette sono **negate all'admin** *(dal 
 | → `EXPIRED` | `409` *«La scadenza è gestita automaticamente dal sistema»* | È dello sweeper (piano del modulo, §4.1). Per liberare subito uno slot, l'admin annulla |
 | `PENDING_PAYMENT` → `CONFIRMED` | `409` *«Questa prenotazione si conferma solo con il pagamento online»* | È del webhook. Confermata a mano resterebbe scontata e mai pagata |
 
+**Conferma dopo la scadenza del blocco** *(dal 09/10/2026)*. Una prenotazione `PENDING_CONFIRMATION` il cui blocco è scaduto, ma che lo sweeper non ha ancora portato a `EXPIRED`, non occupa più le notti: una nuova prenotazione le può prendere. Se l'admin la conferma dopo, riattivarla violerebbe il vincolo anti-overbooking. Prima la risposta era `500`; ora è `409` `RoomNotAvailable`, *«Le camere sono state prenotate da qualcun altro nel frattempo: la prenotazione non si può più confermare»*. La transazione viene annullata: la prenotazione resta in attesa, nessuna voce di cronologia, nessuna email, e scadrà da sola.
+
 L'annullamento libera **immediatamente** lo slot. Annullare una prenotazione `PENDING_PAYMENT` è sicuro anche se l'ospite è sulla pagina di pagamento: un'autorizzazione che arriva dopo viene **rilasciata** senza incasso (esito `NOT_PAYABLE`, vedi `payment_api.md`).
 
 **Email** *(dal 04/10/2026)* — due transizioni avvisano l'ospite:
@@ -888,7 +895,7 @@ Arrivo, conclusione e mancata presentazione non mandano nulla: riguardano il fun
 
 **Risposta completa** *(dal 04/10/2026)* — `status_history` contiene anche la voce appena scritta. Prima la cronologia veniva restituita come era stata letta *prima* della transizione, e il client doveva rileggere il dettaglio. Vale per tutte le risposte `BookingSchema` dell'area admin (creazione, stato, incasso, proroga).
 
-**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`, `test_scadenza_manuale_rifiutata`, `test_conferma_manuale_di_un_pagamento_online_rifiutata`, `test_conferma_manuale_di_una_attesa_email_consentita`; classe `TestStatusResponseAndEmails` (6): cronologia nella risposta di creazione e di cambio stato, link di gestione funzionante dopo la conferma dell'admin, vecchio link di conferma che risponde «già confermata», nessun link per un soggiorno già iniziato, nessuna email su arrivo e conclusione. Classe `TestEarlyDepartureAndNoShow` (6): partenza anticipata con e senza motivazione, rifiutata il giorno dell'arrivo, notti rimaste ancora occupate; non presentato che libera le notti future e quelle passate.
+**Test**: `TestOperations::test_annullamento_senza_motivazione_rifiutato`, `test_check_in_anticipato_rifiutato`, `test_transizione_illegale_rifiutata`, `test_annullamento_libera_lo_slot`, `test_scadenza_manuale_rifiutata`, `test_conferma_manuale_di_un_pagamento_online_rifiutata`, `test_conferma_manuale_di_una_attesa_email_consentita`; classe `TestStatusResponseAndEmails` (6): cronologia nella risposta di creazione e di cambio stato, link di gestione funzionante dopo la conferma dell'admin, vecchio link di conferma che risponde «già confermata», nessun link per un soggiorno già iniziato, nessuna email su arrivo e conclusione. Classe `TestEarlyDepartureAndNoShow` (6): partenza anticipata con e senza motivazione, rifiutata il giorno dell'arrivo, notti rimaste ancora occupate; non presentato che libera le notti future e quelle passate. `TestExpiredHoldConfirmation::test_conferma_dopo_che_le_notti_sono_state_rivendute`: `409`, la prima resta in attesa con la sola voce di creazione, la seconda resta confermata.
 
 ---
 
@@ -908,7 +915,7 @@ Arrivo, conclusione e mancata presentazione non mandano nulla: riguardano il fun
 
 **Il campo `amount` non esiste più** *(rimosso il 28/09/2026)*. Era accettato e scartato in silenzio: `Booking` registra quanto è **dovuto**, non quanto è stato **incassato**, e non aveva dove salvarlo (debito #21). Lo schema ora rifiuta i campi non dichiarati, quindi chi lo invia riceve `422` *«Il campo 'amount' non è previsto.»* invece di un `200` fuorviante. L'incasso registrato vale per il totale della prenotazione.
 
-**Contratto** (`422`): `payment_method` solo `CASH_ON_SITE` · `POS_ON_SITE` · `BANK_TRANSFER`; `payment_status` solo `PAID` · `REFUNDED` · `PENDING`; con `PAID` il metodo è obbligatorio.
+**Contratto** (`422`): `payment_method` solo `CASH_ON_SITE` · `POS_ON_SITE` · `BANK_TRANSFER`; `payment_status` solo `PAID` · `REFUNDED` · `PENDING`; con `PAID` il metodo è obbligatorio; **`reason` obbligatoria per `REFUNDED` e `PENDING`** *(dal 09/10/2026)* — *«La motivazione è obbligatoria per un rimborso o una correzione»*, massimo 500 caratteri, spazi ai bordi tolti, solo spazi = assente.
 
 **Regole sulla prenotazione** (`409`, `InvalidPaymentOperation`):
 
@@ -919,9 +926,13 @@ Arrivo, conclusione e mancata presentazione non mandano nulla: riguardano il fun
 | `REFUNDED` | pagamento `PAID`, **qualunque stato della prenotazione, anche `CANCELLED`** — è il caso tipico: si annulla, poi si restituisce | invariato se omesso |
 | `PENDING` | pagamento `PAID` — correzione di un incasso registrato per errore | azzerato |
 
-**Audit**: ogni registrazione riuscita scrive nel log applicativo, **dopo il commit**, codice prenotazione, stato precedente e nuovo, metodo e id dell'admin — nessun dato dell'ospite. Un tentativo rifiutato o un salvataggio fallito non lasciano la riga. Lo storico in tabella registra solo le transizioni della prenotazione; uno storico dei pagamenti andrà con `amount_paid` (debito #21).
+**Storico dei pagamenti** *(dal 09/10/2026)*. Ogni cambio di `payment_status` lascia una voce in `booking_payment_history` — stato precedente e nuovo, metodo risultante, attore, motivazione — **nella stessa transazione** del cambiamento: un'operazione rifiutata o un salvataggio fallito non la lasciano. Vale per **tutti** i percorsi, non solo questo endpoint: c'è un unico punto del codice che cambia lo stato del pagamento (`BookingService._set_payment_status`), usato dall'incasso manuale, dalla creazione già pagata (`from_status = null`, *«Incasso registrato alla creazione»*) e dagli esiti di Stripe (attore `SYSTEM`). Un evento ripetuto che non cambia nulla — Stripe ripete i webhook — non lascia una seconda voce. Le voci compaiono in `BookingSchema.payment_history`, **solo nella vista amministrativa**, senza l'id dell'operatore; **nessun importo** (debito #21). Le prenotazioni pagate prima di questa data non hanno voci: lo storico non viene ricostruito a ritroso.
 
-**Test**: `TestOperations::test_registrazione_incasso` e l'intera classe `TestManualPayment` (8 test); il contratto in `test_booking_schema.py::TestAdminPaymentRegistration`.
+**Concorrenza**. Due operatori che registrano insieme sulla stessa prenotazione: il secondo salvataggio trova la `version` cambiata e riceve `409` (`StaleDataError`), senza effetti.
+
+**Audit**: oltre alla voce di storico, ogni registrazione riuscita scrive nel log applicativo, **dopo il commit**, codice prenotazione, stato precedente e nuovo, metodo e id dell'admin — nessun dato dell'ospite e nessuna motivazione (testo libero, potrebbe contenerne).
+
+**Test**: `TestOperations::test_registrazione_incasso` e l'intera classe `TestManualPayment` (8 test); classe `TestPaymentHistory` (8): voce per incasso, rimborso e correzione con motivazione, motivazione obbligatoria, nessuna voce su un'operazione rifiutata, creazione già pagata, storico assente dalle risposte pubbliche, `403`/`401`; in `test_payment_api.py` le voci di Stripe e l'evento ripetuto; il contratto in `test_booking_schema.py::TestAdminPaymentRegistration`.
 
 ---
 
@@ -1057,7 +1068,7 @@ Solo il token, senza `reason`: qui non si cancella nulla. Schema separato da `Bo
 |:--|:--|
 | `AdminBookingCreateSchema` | date, `guest_count`, `room_ids`, `payment_option`, `payment_method?`, **`user_id` XOR `guest`**, `skip_email_confirmation` (default `true`), `mark_as_paid` (default `false`), `admin_notes?` — consente date nel passato; **pagamento coerente** (vedi endpoint 12) |
 | `BookingStatusUpdateSchema` | `new_status`, `reason?` — **obbligatoria** se `new_status = CANCELLED` |
-| `AdminPaymentRegistrationSchema` | `payment_status` (`PAID` · `REFUNDED` · `PENDING`), `payment_method?` (solo manuali; obbligatorio con `PAID`) — **`extra="forbid"`**: `amount` e ogni altro campo non dichiarato → `422` |
+| `AdminPaymentRegistrationSchema` | `payment_status` (`PAID` · `REFUNDED` · `PENDING`), `payment_method?` (solo manuali; obbligatorio con `PAID`), `reason?` (≤ 500; obbligatoria con `REFUNDED` e `PENDING`) — **`extra="forbid"`**: `amount` e ogni altro campo non dichiarato → `422` |
 | `BookingExtendHoldSchema` | `minutes` (1–120) |
 | `BookingSearchFiltersSchema` | `status[]?`, `date_from?`, `date_to?`, `email?`, `code?`, `room_id?`, `sort` (`BookingSortOrder`, default `CHECK_IN_DESC`), `page` (default 1), `page_size` (default 20, max 100) |
 
@@ -1144,7 +1155,7 @@ Solo il token, senza `reason`: qui non si cancella nulla. Schema separato da `Bo
 
 #### `BookingSchema` — vista amministrativa
 
-Tutti i campi di `BookingPublicSchema`, più: `id`, `source_channel`, `user_id`, `guest_phone`, `payment_method`, `cancelled_at`, `cancellation_reason`, `admin_notes`, `created_at`, `updated_at`, `created_by`, `last_updated_by`, **`version`**, `status_history[]`.
+Tutti i campi di `BookingPublicSchema`, più: `id`, `source_channel`, `user_id`, `guest_phone`, `payment_method`, `cancelled_at`, `cancellation_reason`, `admin_notes`, `created_at`, `updated_at`, `created_by`, `last_updated_by`, **`version`**, `status_history[]`, `payment_history[]` *(dal 09/10/2026)*.
 
 > **`version` è il contatore dell'optimistic locking**, mantenuto dal database (`version_id_col`). Oggi nessun endpoint lo accetta in ingresso: la modifica amministrativa è stata rimossa (voce 13, debito #21). Resta esposto perché sarà il valore da rimandare quando quel percorso tornerà. Volutamente assente da `BookingPublicSchema`: all'ospite non serve.
 
@@ -1159,6 +1170,12 @@ Porta la vista completa, non quella pubblica: l'admin deve vedere audit, canale 
 `from_status?` · `to_status` · `actor_type` · `reason?` · `created_at`.
 
 > Lo storico può registrare **anche modifiche che non cambiano stato**, con una riga in cui `from_status == to_status`. Le scriveva la `PATCH`, oggi rimossa; il meccanismo resta perché "chi ha fatto cosa e quando" è esattamente l'informazione che serve in caso di contestazione, e la modifica tornerà.
+
+#### `BookingPaymentHistorySchema` *(dal 09/10/2026)*
+
+`from_status?` · `to_status` · `payment_method?` · `actor_type` · `reason?` · `created_at`.
+
+> Timeline del **pagamento**, separata da quella della prenotazione perché descrive un'altra macchina a stati. `from_status` è `null` sulla voce di una prenotazione nata già pagata; `payment_method` è il metodo **dopo** il cambiamento (`null` dopo una correzione). Nessun `actor_id` e nessun importo.
 
 #### `BookingListItemSchema` e `PaginatedBookingsSchema`
 
@@ -1236,14 +1253,14 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 
 | File | Test | Database | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_booking_schema.py` | 68 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
+| `test_booking_schema.py` | 77 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 15 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi; notti del calendario (giorno di partenza libero, unione, ritaglio) |
 | `test_occupancy_api.py` | 18 | sì | Calendario: notti occupate, giorno di partenza libero, unione fra camere, blocco scaduto, annullate e scadute, ritaglio sulla finestra, `404`/`409`/`422`/`429`, **coerenza con `/availability`** |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
-| `test_exception_handler.py` | 6 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste |
-| `test_admin_booking_api.py` | 55 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga**, cronologia nelle risposte, email della conferma dall'admin, **partenza anticipata e mancata presentazione** |
+| `test_exception_handler.py` | 9 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste, **violazioni di vincolo (`409`/`500`) senza SQL né dati dell'ospite** |
+| `test_admin_booking_api.py` | 64 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga**, cronologia nelle risposte, email della conferma dall'admin, **partenza anticipata e mancata presentazione**, **storico dei pagamenti**, **conferma con notti rivendute** |
 | `test_room_api.py` | 3 | sì | Una camera con prenotazioni non si elimina, nemmeno se disattivata |
 | `test_email_service.py` | 36 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale, **testi coerenti con le regole**, formato dei termini |
 | `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
@@ -1324,6 +1341,9 @@ Da eseguire su Swagger (`/docs`) a sviluppo concluso.
 - [ ] Incasso con `amount` nel body → `422` *«Il campo 'amount' non è previsto.»*
 - [ ] Incasso su prenotazione annullata → `409`; rimborso sulla stessa, se era pagata → `200`, metodo invariato
 - [ ] Rimborso su prenotazione mai pagata → `409`
+- [ ] Rimborso o correzione senza `reason` → `422`; con `reason` → `200` e voce in `payment_history`
+- [ ] Incasso → voce in `payment_history` con metodo e attore `ADMIN`, senza `actor_id`
+- [ ] `POST /bookings/lookup` della stessa prenotazione → nessun `payment_history` nella risposta
 - [ ] `PENDING_CONFIRMATION` → `EXPIRED` dall'admin → `409`
 - [ ] `PENDING_PAYMENT` → `CONFIRMED` dall'admin → `409`
 - [ ] Creazione admin `PAY_NOW` senza `mark_as_paid` → `422`
@@ -1436,6 +1456,8 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 09/10/2026 | **—** | **Difetto: la conferma dall'admin di una prenotazione con blocco scaduto e notti rivendute rispondeva `500`** — ora `409` `RoomNotAvailable` e la prenotazione resta in attesa. **Nuovo handler globale su `IntegrityError`**: `409` per sovrapposizione, duplicato e riferimento mancante, `500` per il resto, mai SQL né parametri nella risposta o nei log. Riconoscimento SQLSTATE unificato in `src/data/integrity_errors.py`. +1 test admin, +3 handler |
+| 09/10/2026 | **—** | **Storico dei pagamenti**: nuova tabella `booking_payment_history` (migrazione `b5e8d2c47a19`) e `BookingSchema.payment_history`; un unico punto cambia `payment_status` (`_set_payment_status`) e lascia la voce, per incassi e rimborsi manuali, creazione già pagata ed esiti di Stripe. `POST /admin/bookings/{id}/payment`: **`reason` obbligatoria per rimborso e correzione**. Composizione del `BookingService` unificata (`build_booking_service`). +8 test admin, +2 pagamenti, +9 schema |
 | 07/10/2026 | **—** | `POST /admin/bookings/{id}/status`: **partenza anticipata** ammessa dal giorno dopo l'arrivo, con motivazione obbligatoria (nuova `StatusChangeReasonRequired`, `422`); le notti rimaste restano occupate. **`NO_SHOW` libera le camere** (fuori da `OCCUPYING_BOOKING_STATUSES`); migrazione dati `a7c3e91f5d20` per le prenotazioni già segnate. +6 test |
 | 04/10/2026 | **—** | `POST /admin/bookings/{id}/status`: la **conferma** dall'admin emette il link di gestione e manda `booking_confirmed` (prima l'ospite confermato al telefono restava senza link), e invalida il vecchio link di conferma. Le risposte `BookingSchema` dell'area admin includono la voce di cronologia appena scritta (`_to_admin_schema` ricarica `status_history`). +6 test |
 | 03/10/2026 | **—** | **Nuovo `GET /bookings/occupancy`** (endpoint 1b): notti non disponibili per 1–5 camere in una finestra `[date_from, date_to)` di al massimo 92 giorni (`occupancy_max_window_days`), solo date unite, pubblico con rate limit. Serve al calendario del back-office (incremento 3b). La condizione di occupazione è ora un unico metodo del repository (`_occupying_item_conditions`), condiviso da disponibilità, conflitti e calendario; la verifica delle camere prenotabili è un unico helper (`src/service/bookable_rooms.py`), condiviso da creazione e calendario. +32 test |

@@ -18,8 +18,6 @@ from src.data.enumerators import BookingStatus, PaymentOption
 from src.data.model.booking import Booking
 from src.data.repository.booking_repository import BookingRepository
 from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
-from src.data.repository.booking_token_repository import BookingTokenRepository
-from src.data.repository.room_repository import RoomRepository
 from src.data.schemas.booking_schema import GuestBookingCreateSchema
 from src.exception.custom_exception import (
     BookingHoldExpired,
@@ -28,8 +26,7 @@ from src.exception.custom_exception import (
     RoomNotAvailable,
 )
 from src.security.quote_token import QuotePayload, create_quote_token
-from src.service.booking_service import BookingService
-from src.service.pricing_service import PricingService
+from src.service.booking_service import BookingService, build_booking_service
 
 CHECK_IN = date.today() + timedelta(days=30)
 CHECK_OUT = CHECK_IN + timedelta(days=2)
@@ -44,14 +41,7 @@ GUEST = {
 
 
 def build_service(session: AsyncSession) -> BookingService:
-    return BookingService(
-        session=session,
-        booking_repository=BookingRepository(session),
-        booking_token_repository=BookingTokenRepository(session),
-        booking_status_history_repository=BookingStatusHistoryRepository(session),
-        room_repository=RoomRepository(session),
-        pricing_service=PricingService(),
-    )
+    return build_booking_service(session)
 
 
 def build_quote_token(

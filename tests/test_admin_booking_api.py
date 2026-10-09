@@ -5,8 +5,7 @@ L'autenticazione passa da un **login reale** su `/api/v1/auth/token`, non da
 una dipendenza sovrascritta: così i test attraversano l'intera catena e
 verificano anche che `is_admin_user` respinga chi amministratore non è.
 """
-from datetime import date, timedelta
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import update
@@ -523,7 +522,8 @@ class TestManualPayment:
         await _cancel(admin_client, booking["id"])
 
         response = await _register_payment(
-            admin_client, booking["id"], payment_status="REFUNDED"
+            admin_client, booking["id"], payment_status="REFUNDED",
+            reason="Restituito all'ospite",
         )
 
         assert response.status_code == 200, response.text
@@ -539,7 +539,8 @@ class TestManualPayment:
         booking = await _create_booking(admin_client, [rooms[0].id])
 
         response = await _register_payment(
-            admin_client, booking["id"], payment_status="REFUNDED"
+            admin_client, booking["id"], payment_status="REFUNDED",
+            reason="Restituito all'ospite",
         )
 
         assert response.status_code == 409
@@ -552,7 +553,8 @@ class TestManualPayment:
         )
 
         response = await _register_payment(
-            admin_client, booking["id"], payment_status="PENDING"
+            admin_client, booking["id"], payment_status="PENDING",
+            reason="Incasso registrato per errore",
         )
 
         assert response.status_code == 200, response.text
@@ -586,7 +588,8 @@ class TestManualPayment:
 
         with caplog.at_level("INFO", logger="src.service.booking_service"):
             response = await _register_payment(
-                admin_client, booking["id"], payment_status="REFUNDED"
+                admin_client, booking["id"], payment_status="REFUNDED",
+                reason="Restituito all'ospite",
             )
         assert response.status_code == 409
 
@@ -607,7 +610,8 @@ class TestManualPayment:
         await session.commit()
 
         response = await _register_payment(
-            admin_client, booking["id"], payment_status="REFUNDED"
+            admin_client, booking["id"], payment_status="REFUNDED",
+            reason="Restituito all'ospite",
         )
 
         assert response.status_code == 409
@@ -768,6 +772,48 @@ async def _status(admin_client, booking_id, new_status, reason=None):
     return await admin_client.post(f"{BASE}/{booking_id}/status", json=body)
 
 
+class TestExpiredHoldConfirmation:
+
+    async def test_conferma_dopo_che_le_notti_sono_state_rivendute(
+            self, admin_client, rooms, session
+    ):
+        """
+        Blocco scaduto e notti già vendute a un altro ospite: la conferma
+        dall'admin rispondeva `500`. Ora `409`, e nulla cambia.
+        """
+        in_attesa = await _create_booking(
+            admin_client, [rooms[0].id], skip_email_confirmation=False
+        )
+        assert in_attesa["status"] == "PENDING_CONFIRMATION"
+
+        # Il blocco scade prima che passi la scadenza automatica.
+        await session.execute(
+            update(Booking)
+            .where(Booking.id == UUID(in_attesa["id"]))
+            .values(hold_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+        )
+        await session.commit()
+
+        # Un altro ospite prende le stesse notti: la creazione libera il blocco scaduto.
+        altra = await _create_booking(
+            admin_client, [rooms[0].id], guest={**GUEST, "email": "altro.ospite@example.com"}
+        )
+        assert altra["status"] == "CONFIRMED"
+
+        response = await admin_client.post(
+            f"{BASE}/{in_attesa['id']}/status", json={"new_status": "CONFIRMED"}
+        )
+
+        assert response.status_code == 409, response.text
+        assert "prenotate da qualcun altro" in response.json()["message"]
+
+        prima = await admin_client.get(f"{BASE}/{in_attesa['id']}")
+        assert prima.json()["status"] == "PENDING_CONFIRMATION"
+        assert len(prima.json()["status_history"]) == 1
+        seconda = await admin_client.get(f"{BASE}/{altra['id']}")
+        assert seconda.json()["status"] == "CONFIRMED"
+
+
 class TestEarlyDepartureAndNoShow:
 
     async def test_conclusione_anticipata_con_motivazione_consentita(self, admin_client, rooms):
@@ -863,3 +909,132 @@ class TestEarlyDepartureAndNoShow:
             ),
         )
         assert walk_in.status_code == 201, walk_in.text
+
+
+# ===========================================================================
+# Storico dei pagamenti (incremento 5 del frontend)
+# ===========================================================================
+
+class TestPaymentHistory:
+
+    async def test_l_incasso_lascia_una_voce(self, admin_client, rooms):
+        booking = await _create_booking(admin_client, [rooms[0].id])
+        assert booking["payment_history"] == []
+
+        response = await _register_payment(
+            admin_client, booking["id"], payment_method="POS_ON_SITE", payment_status="PAID"
+        )
+
+        assert response.status_code == 200, response.text
+        storico = response.json()["payment_history"]
+        assert len(storico) == 1
+        assert storico[0]["from_status"] == "PENDING"
+        assert storico[0]["to_status"] == "PAID"
+        assert storico[0]["payment_method"] == "POS_ON_SITE"
+        assert storico[0]["actor_type"] == "ADMIN"
+        assert storico[0]["reason"] is None
+        # L'operatore resta nel database, non nella risposta.
+        assert "actor_id" not in storico[0]
+
+    async def test_rimborso_e_correzione_lasciano_voce_con_motivazione(self, admin_client, rooms):
+        booking = await _create_booking(
+            admin_client, [rooms[0].id], payment_method="CASH_ON_SITE", mark_as_paid=True
+        )
+
+        rimborso = await _register_payment(
+            admin_client, booking["id"], payment_status="REFUNDED", reason="  Restituiti in contanti  "
+        )
+        assert rimborso.status_code == 200, rimborso.text
+        voce = rimborso.json()["payment_history"][-1]
+        assert (voce["from_status"], voce["to_status"]) == ("PAID", "REFUNDED")
+        assert voce["payment_method"] == "CASH_ON_SITE"
+        assert voce["reason"] == "Restituiti in contanti"
+
+        incasso = await _register_payment(
+            admin_client, booking["id"], payment_method="BANK_TRANSFER", payment_status="PAID"
+        )
+        assert incasso.status_code == 200, incasso.text
+
+        correzione = await _register_payment(
+            admin_client, booking["id"], payment_status="PENDING", reason="Bonifico mai arrivato"
+        )
+        assert correzione.status_code == 200, correzione.text
+        storico = correzione.json()["payment_history"]
+        assert [v["to_status"] for v in storico] == ["PAID", "REFUNDED", "PAID", "PENDING"]
+        assert storico[-1]["payment_method"] is None
+        assert storico[-1]["reason"] == "Bonifico mai arrivato"
+
+    async def test_rimborso_senza_motivazione_rifiutato(self, admin_client, rooms):
+        booking = await _create_booking(
+            admin_client, [rooms[0].id], payment_method="CASH_ON_SITE", mark_as_paid=True
+        )
+
+        for motivazione in (None, "   "):
+            payload = {"payment_status": "REFUNDED"}
+            if motivazione is not None:
+                payload["reason"] = motivazione
+            response = await _register_payment(admin_client, booking["id"], **payload)
+            assert response.status_code == 422
+            assert "motivazione" in response.json()["message"].lower()
+
+        riletta = await admin_client.get(f"{BASE}/{booking['id']}")
+        assert riletta.json()["payment_status"] == "PAID"
+        assert len(riletta.json()["payment_history"]) == 1
+
+    async def test_un_operazione_rifiutata_non_lascia_voce(self, admin_client, rooms):
+        booking = await _create_booking(
+            admin_client, [rooms[0].id], payment_method="CASH_ON_SITE", mark_as_paid=True
+        )
+
+        doppio = await _register_payment(
+            admin_client, booking["id"], payment_method="CASH_ON_SITE", payment_status="PAID"
+        )
+        assert doppio.status_code == 409
+
+        riletta = await admin_client.get(f"{BASE}/{booking['id']}")
+        assert len(riletta.json()["payment_history"]) == 1
+
+    async def test_la_creazione_gia_pagata_lascia_una_voce(self, admin_client, rooms):
+        booking = await _create_booking(
+            admin_client, [rooms[0].id], payment_method="CASH_ON_SITE", mark_as_paid=True
+        )
+
+        storico = booking["payment_history"]
+        assert len(storico) == 1
+        assert storico[0]["from_status"] is None
+        assert storico[0]["to_status"] == "PAID"
+        assert storico[0]["payment_method"] == "CASH_ON_SITE"
+        assert storico[0]["actor_type"] == "ADMIN"
+        assert storico[0]["reason"] == "Incasso registrato alla creazione"
+
+    async def test_lo_storico_dei_pagamenti_non_esce_dalle_risposte_pubbliche(
+            self, admin_client, rooms
+    ):
+        booking = await _create_booking(
+            admin_client, [rooms[0].id], payment_method="CASH_ON_SITE", mark_as_paid=True
+        )
+
+        pubblica = await admin_client.post(
+            f"{PUBLIC}/lookup", json={"code": booking["code"], "email": GUEST["email"]}
+        )
+        assert pubblica.status_code == 200, pubblica.text
+        assert "payment_history" not in pubblica.json()
+        assert "status_history" not in pubblica.json()
+
+    async def test_registrare_un_pagamento_e_riservato_all_admin(self, user_client):
+        """
+        Il controllo del ruolo è sul router e scatta prima di qualunque
+        lettura: un utente normale riceve 403 anche su un id inesistente.
+        """
+        response = await user_client.post(
+            f"{BASE}/{uuid4()}/payment",
+            json={"payment_status": "PAID", "payment_method": "CASH_ON_SITE"},
+        )
+        assert response.status_code == 403
+
+    async def test_senza_sessione_401(self, api_client):
+        response = await api_client.post(
+            f"{BASE}/{uuid4()}/payment",
+            json={"payment_status": "PAID", "payment_method": "CASH_ON_SITE"},
+        )
+        assert response.status_code == 401

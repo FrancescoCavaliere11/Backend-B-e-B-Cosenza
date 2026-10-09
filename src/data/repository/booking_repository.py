@@ -538,5 +538,9 @@ class BookingRepository:
                 selectinload(Booking.items).selectinload(BookingRoomItem.room)
             )
         if with_history:
-            query = query.options(selectinload(Booking.status_history))
+            # Le due timeline della scheda: stati della prenotazione e pagamento.
+            query = query.options(
+                selectinload(Booking.status_history),
+                selectinload(Booking.payment_history),
+            )
         return query

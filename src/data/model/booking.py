@@ -37,6 +37,7 @@ from src.security.audit_logging import Auditable
 from src.data.model.booking_room_item import BookingRoomItem  # noqa: F401
 from src.data.model.booking_token import BookingToken  # noqa: F401
 from src.data.model.booking_status_history import BookingStatusHistory  # noqa: F401
+from src.data.model.booking_payment_history import BookingPaymentHistory  # noqa: F401
 
 
 class Booking(Base, Auditable):
@@ -193,6 +194,16 @@ class Booking(Base, Auditable):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="BookingStatusHistory.created_at",
+    )
+
+    #: Incassi, rimborsi, correzioni ed esiti di Stripe. Separata da
+    #: `status_history`: è un'altra macchina a stati (vedi il modello).
+    payment_history: Mapped[List["BookingPaymentHistory"]] = relationship(
+        back_populates="booking",
+        lazy="select",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="BookingPaymentHistory.created_at",
     )
 
     __mapper_args__ = {"version_id_col": version}

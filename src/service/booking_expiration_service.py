@@ -41,19 +41,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.config.config import settings
 from src.config.database_config import async_session_maker
-from src.data.repository.booking_repository import BookingRepository
-from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
-from src.data.repository.booking_token_repository import BookingTokenRepository
-from src.data.repository.room_repository import RoomRepository
 from src.data.schemas.booking_schema import SweepResultSchema
 from src.exception.custom_exception import (
     PaymentGatewayError,
     PaymentIntentNotCancellable,
 )
 from src.service.booking_service import BookingService, ExpiredBookingNotice
+from src.service.booking_service import build_booking_service as _compose_booking_service
 from src.service.email.email_service import EmailService, get_email_service
 from src.service.payment.gateway import StripeGateway
-from src.service.pricing_service import PricingService
 
 logger = logging.getLogger(__name__)
 
@@ -63,16 +59,10 @@ def build_booking_service(session) -> BookingService:
     Compone un `BookingService` su una sessione qualsiasi.
 
     Serve allo sweeper, che non passa dal sistema di dipendenze di FastAPI e
-    quindi non può riusare `get_booking_service`.
+    quindi non può riusare `get_booking_service`. Delega alla composizione
+    unica di `booking_service.build_booking_service`.
     """
-    return BookingService(
-        session=session,
-        booking_repository=BookingRepository(session),
-        booking_token_repository=BookingTokenRepository(session),
-        booking_status_history_repository=BookingStatusHistoryRepository(session),
-        room_repository=RoomRepository(session),
-        pricing_service=PricingService(),
-    )
+    return _compose_booking_service(session)
 
 
 async def dispatch_expiration_notices(

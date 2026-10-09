@@ -5,11 +5,13 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import StaleDataError
 from starlette import status
 from starlette.responses import JSONResponse
 
-from src.exception.custom_exception import AppException, RateLimitExceeded
+from src.data.integrity_errors import is_conflict_violation, is_overlap_violation, sqlstate_of
+from src.exception.custom_exception import AppException, RateLimitExceeded, RoomNotAvailable
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +213,47 @@ def setup_exception_handler(app: FastAPI):
     # `version_id_col` non trova la riga alla versione attesa: significa che
     # qualcun altro l'ha modificata nel frattempo. È un conflitto di business,
     # non un errore interno.
+    # ------------------------------------------------------------------ #
+    # Vincoli del database: rete di sicurezza                             #
+    # ------------------------------------------------------------------ #
+    # I Service traducono le violazioni che si aspettano (la collisione di
+    # due prenotazioni diventa `RoomNotAvailable`). Questo handler copre i
+    # percorsi che se ne dimenticano: senza, un vincolo violato arriva al
+    # client come `500` «errore imprevisto», com'è successo alla conferma
+    # dell'admin di una prenotazione con il blocco scaduto.
+    #
+    # ⚠️ Il messaggio dell'eccezione contiene l'istruzione SQL **e i suoi
+    # parametri**, cioè i dati dell'ospite: non va né restituito né scritto nei
+    # log. Si registrano solo il codice SQLSTATE e il percorso.
+    @app.exception_handler(IntegrityError)
+    async def integrity_exception_handler(request: Request, exc: IntegrityError):
+        sqlstate = sqlstate_of(exc)
+
+        if is_overlap_violation(exc):
+            logger.warning("Sovrapposizione intercettata dall'handler globale: %s %s",
+                           request.method, request.url.path)
+            return JSONResponse(
+                status_code=RoomNotAvailable.status_code,
+                content={"message": RoomNotAvailable.default_message},
+            )
+
+        if is_conflict_violation(exc):
+            logger.warning("Vincolo violato (SQLSTATE %s): %s %s",
+                           sqlstate, request.method, request.url.path)
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"message": "L'operazione è in conflitto con dati già presenti. "
+                                    "Ricarica la pagina e riprova."},
+            )
+
+        # Campo obbligatorio mancante, vincolo di controllo: un bug del server.
+        logger.error("Errore di integrità non previsto (SQLSTATE %s): %s %s",
+                     sqlstate, request.method, request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"message": "Errore interno del server"},
+        )
+
     @app.exception_handler(StaleDataError)
     async def stale_data_exception_handler(request: Request, exc: StaleDataError):
         return JSONResponse(

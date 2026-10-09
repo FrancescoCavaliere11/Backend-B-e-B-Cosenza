@@ -28,6 +28,7 @@ from src.data.model.extra_service import ExtraService
 from src.data.model.booking_room_item import BookingRoomItem
 from src.data.model.booking_token import BookingToken
 from src.data.model.booking_status_history import BookingStatusHistory
+from src.data.model.booking_payment_history import BookingPaymentHistory
 from src.data.model.stripe_event import StripeEvent
 
 

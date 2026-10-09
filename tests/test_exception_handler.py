@@ -12,9 +12,31 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Query
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import IntegrityError
 
 from src.exception.exception_handler import setup_exception_handler
 from src.routers.dependencies import build_request_model
+
+
+class _ErroreDelDriver(Exception):
+    """Errore del driver PostgreSQL ridotto all'essenziale: il codice SQLSTATE."""
+
+    def __init__(self, sqlstate: str, testo: str):
+        super().__init__(testo)
+        self.sqlstate = sqlstate
+
+
+#: Dato dell'ospite che compare nei parametri dell'istruzione SQL fallita.
+_EMAIL_NEI_PARAMETRI = "mario.rossi@example.com"
+
+
+def _violazione(sqlstate: str) -> IntegrityError:
+    """`IntegrityError` come la solleva SQLAlchemy: istruzione, parametri, errore del driver."""
+    return IntegrityError(
+        "INSERT INTO bookings (guest_email) VALUES ($1)",
+        (_EMAIL_NEI_PARAMETRI,),
+        _ErroreDelDriver(sqlstate, f"violazione {sqlstate} per {_EMAIL_NEI_PARAMETRI}"),
+    )
 
 
 class _Risposta(BaseModel):
@@ -59,6 +81,11 @@ def _app() -> FastAPI:
     @application.post("/campo-in-piu")
     async def campo_in_piu(corpo: _Chiuso):
         return {"stato": corpo.stato}
+
+    @application.get("/vincolo/{sqlstate}")
+    async def vincolo(sqlstate: str):
+        # Un vincolo del database violato in un percorso che non lo intercetta.
+        raise _violazione(sqlstate)
 
     @application.post("/lista")
     async def lista(corpo: _ConLista):
@@ -151,3 +178,38 @@ async def test_un_errore_in_una_lista_nomina_il_campo_non_l_indice():
 
     assert response.status_code == 422
     assert response.json()["message"].startswith("Errore sul campo 'room_ids'")
+
+
+# ===========================================================================
+# Vincoli del database: rete di sicurezza
+# ===========================================================================
+
+async def test_una_sovrapposizione_non_intercettata_e_un_409():
+    """
+    Il caso che ha motivato l'handler: la conferma dall'admin di una
+    prenotazione con il blocco scaduto e le notti rivendute rispondeva `500`.
+    """
+    response = await _chiama("/vincolo/23P01")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "message": "Una o più camere non sono disponibili per le date richieste"
+    }
+
+
+async def test_un_valore_duplicato_e_un_409_senza_dati_dell_istruzione():
+    response = await _chiama("/vincolo/23505")
+
+    assert response.status_code == 409
+    # Né l'istruzione SQL né i suoi parametri: contengono i dati dell'ospite.
+    assert _EMAIL_NEI_PARAMETRI not in response.text
+    assert "INSERT" not in response.text
+
+
+async def test_un_campo_obbligatorio_mancante_e_un_500():
+    """Un `NOT NULL` violato è un bug del server, non un conflitto da far ritentare."""
+    response = await _chiama("/vincolo/23502")
+
+    assert response.status_code == 500
+    assert response.json() == {"message": "Errore interno del server"}
+    assert _EMAIL_NEI_PARAMETRI not in response.text

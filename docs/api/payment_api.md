@@ -217,6 +217,12 @@ significherebbe perdere pagamenti, e chi non ha la firma viene comunque respinto
 | `charge.refunded` | `payment_status = REFUNDED` |
 | tutti gli altri | `200` e una riga di log |
 
+Ogni cambio di `payment_status` prodotto da questi eventi (autorizzazione,
+incasso, rifiuto, rimborso, chiusura per camere perse) lascia una voce nello
+**storico dei pagamenti** della prenotazione, con attore `SYSTEM`
+*(dal 09/10/2026, vedi `booking_api.md` endpoint 15)*. Un evento ripetuto che
+non cambia lo stato non lascia una seconda voce.
+
 Rispondere con un errore a un evento che non ci riguarda farebbe ritentare
 Stripe per giorni senza alcun motivo.
 
@@ -449,6 +455,7 @@ localhost:8000/api/v1/payments/webhook`.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 09/10/2026 | **—** | Gli esiti di Stripe lasciano una voce nello storico dei pagamenti (`booking_payment_history`, attore `SYSTEM`); evento ripetuto senza effetti = nessuna voce in più |
 | 02/10/2026 | **—** | **Difetto: lo sweeper manuale non rilasciava le autorizzazioni.** `POST /admin/bookings/sweep-expired` esegue ora `sweep_once`, la stessa passata del giro automatico (§6) |
 | 28/09/2026 | **—** | **Nuovo esito `NOT_PAYABLE`**: un'autorizzazione su una prenotazione che non attende più il pagamento (annullata dal back-office durante il checkout) viene rilasciata invece di essere incassata |
 | 26/09/2026 | **—** | Intervallo dello sweeper 60 → 300 s · §6 spiega a cosa serve davvero il rilascio delle autorizzazioni (rendere non pagabile un checkout abbandonato, non sbloccare denaro) |

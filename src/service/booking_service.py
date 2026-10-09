@@ -47,6 +47,8 @@ from src.data.model.booking_token import BookingToken
 from src.data.model.room import Room
 from src.data.model.user import User
 from src.data.repository.booking_repository import BookingRepository
+from src.data.integrity_errors import is_overlap_violation
+from src.data.repository.booking_payment_history_repository import BookingPaymentHistoryRepository
 from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
 from src.data.repository.booking_token_repository import BookingTokenRepository
 from src.data.repository.room_repository import RoomRepository
@@ -62,6 +64,7 @@ from src.data.schemas.booking_schema import (
     BookingRoomItemSchema,
     BookingSchema,
     BookingSearchFiltersSchema,
+    BookingPaymentHistorySchema,
     BookingStatusHistorySchema,
     BookingStatusUpdateSchema,
     GuestCancellationPolicySchema,
@@ -139,10 +142,12 @@ _CODE_MAX_ATTEMPTS = 10
 _GUEST_AUDIT_MARKER = "GUEST"
 _SYSTEM_AUDIT_MARKER = "System"
 
-#: Nome dell'exclusion constraint, usato per riconoscere la collisione fra
-#: prenotazioni concorrenti e distinguerla da altri errori di integrità.
-_OVERLAP_CONSTRAINT = "ex_booking_room_items_no_overlap"
-_EXCLUSION_VIOLATION_SQLSTATE = "23P01"
+#: Motivazione delle voci di storico scritte dagli esiti di Stripe.
+_STRIPE_PAYMENT_REASONS: Dict[PaymentStatus, str] = {
+    PaymentStatus.FAILED: "Pagamento online rifiutato",
+    PaymentStatus.REFUNDED: "Rimborso emesso su Stripe",
+}
+
 
 
 @dataclass
@@ -264,6 +269,7 @@ class BookingService:
             booking_repository: BookingRepository,
             booking_token_repository: BookingTokenRepository,
             booking_status_history_repository: BookingStatusHistoryRepository,
+            booking_payment_history_repository: BookingPaymentHistoryRepository,
             room_repository: RoomRepository,
             pricing_service: PricingService
     ) -> None:
@@ -271,6 +277,7 @@ class BookingService:
         self.booking_repository = booking_repository
         self.token_repository = booking_token_repository
         self.history_repository = booking_status_history_repository
+        self.payment_history_repository = booking_payment_history_repository
         self.room_repository = room_repository
         self.pricing_service = pricing_service
 
@@ -610,6 +617,16 @@ class BookingService:
             actor_id=str(audit_user_id) if audit_user_id else None,
             reason="Creazione della prenotazione",
         )
+        if booking.payment_status == PaymentStatus.PAID:
+            # Nata già pagata (incasso registrato dal back-office alla
+            # creazione): anche questo incasso deve comparire nello storico.
+            self._record_payment_change(
+                booking,
+                None,
+                actor_type,
+                str(audit_user_id) if audit_user_id else None,
+                reason="Incasso registrato alla creazione",
+            )
 
         confirmation_token: Optional[str] = None
         manage_token: Optional[str] = None
@@ -882,7 +899,20 @@ class BookingService:
             await self.token_repository.invalidate_all_for_booking(booking.id)
 
         apply_audit_fields(audit=booking, user_id=admin_id)
-        await self.booking_repository.flush()
+        try:
+            await self.booking_repository.flush()
+        except IntegrityError as error:
+            # Conferma di una prenotazione il cui blocco è scaduto: nel
+            # frattempo le notti possono essere state vendute a qualcun altro
+            # (la creazione libera i blocchi scaduti), e riattivarle
+            # violerebbe il vincolo anti-overbooking. La transazione viene
+            # annullata e la prenotazione resta in attesa: scadrà da sola.
+            if self._is_overlap_violation(error):
+                raise RoomNotAvailable(
+                    "Le camere sono state prenotate da qualcun altro nel frattempo: "
+                    "la prenotazione non si può più confermare"
+                ) from error
+            raise
         return BookingCreationResult(
             booking=await self._to_admin_schema(booking),
             manage_token=manage_token,
@@ -933,7 +963,6 @@ class BookingService:
         self._assert_manual_payment_allowed(booking, payload.payment_status)
 
         previous_status = booking.payment_status
-        booking.payment_status = payload.payment_status
 
         if payload.payment_status == PaymentStatus.PAID:
             booking.payment_method = payload.payment_method
@@ -944,6 +973,17 @@ class BookingService:
         elif payload.payment_method is not None:
             # Rimborso: se non indicato, resta il metodo dell'incasso.
             booking.payment_method = payload.payment_method
+
+        # Le regole garantiscono che lo stato cambi davvero (`PAID` solo da
+        # un pagamento non incassato, il resto solo da `PAID`): la voce di
+        # storico c'è sempre.
+        self._set_payment_status(
+            booking,
+            payload.payment_status,
+            AuditActorType.ADMIN,
+            actor_id=str(admin_id),
+            reason=payload.reason,
+        )
 
         apply_audit_fields(audit=booking, user_id=admin_id)
         await self.booking_repository.flush()
@@ -1280,7 +1320,10 @@ class BookingService:
                 ) from error
             raise
 
-        booking.payment_status = PaymentStatus.AUTHORIZED
+        self._set_payment_status(
+            booking, PaymentStatus.AUTHORIZED, AuditActorType.SYSTEM,
+            reason="Pagamento online autorizzato",
+        )
         await self.booking_repository.flush()
 
         return PaymentAuthorizationResult(PaymentOutcome.CAPTURE, booking.code)
@@ -1323,7 +1366,10 @@ class BookingService:
             reason="Pagamento online incassato",
         )
 
-        booking.payment_status = PaymentStatus.PAID
+        self._set_payment_status(
+            booking, PaymentStatus.PAID, AuditActorType.SYSTEM,
+            reason="Pagamento online incassato",
+        )
         booking.card_brand = card_brand
         booking.card_last4 = card_last4
         booking.confirmed_at = now
@@ -1376,7 +1422,10 @@ class BookingService:
         if booking is None:
             return None
 
-        booking.payment_status = status
+        self._set_payment_status(
+            booking, status, AuditActorType.SYSTEM,
+            reason=_STRIPE_PAYMENT_REASONS.get(status),
+        )
         booking.last_updated_by = _SYSTEM_AUDIT_MARKER
         await self.booking_repository.flush()
 
@@ -1418,7 +1467,9 @@ class BookingService:
         )
         booking.cancelled_at = datetime.now(timezone.utc)
         booking.cancellation_reason = motivo
-        booking.payment_status = PaymentStatus.NOT_REQUIRED
+        self._set_payment_status(
+            booking, PaymentStatus.NOT_REQUIRED, AuditActorType.SYSTEM, reason=motivo,
+        )
         booking.last_updated_by = _SYSTEM_AUDIT_MARKER
 
         await self.token_repository.invalidate_all_for_booking(booking.id)
@@ -1601,6 +1652,51 @@ class BookingService:
             raise InvalidBookingStatusTransition(
                 f"Non è possibile passare dallo stato '{current.value}' a '{new.value}'"
             )
+
+    def _set_payment_status(
+            self,
+            booking: Booking,
+            new_status: PaymentStatus,
+            actor_type: AuditActorType,
+            actor_id: Optional[str] = None,
+            reason: Optional[str] = None
+    ) -> None:
+        """
+        Cambia lo stato del pagamento e ne registra la traccia storica.
+
+        **Unico punto in cui `booking.payment_status` viene modificato** dopo
+        la creazione, come `_apply_transition` per lo stato della
+        prenotazione: incasso e rimborso manuali, autorizzazione, incasso,
+        rifiuto e rimborso di Stripe, chiusura per camere perse. Il metodo va
+        impostato **prima** di chiamarlo: la voce registra quello risultante.
+
+        Un evento ripetuto che non cambia nulla — Stripe consegna lo stesso
+        webhook più volte — non lascia una seconda voce.
+        """
+        previous = booking.payment_status
+        if previous == new_status:
+            return
+        booking.payment_status = new_status
+        self._record_payment_change(booking, previous, actor_type, actor_id, reason)
+
+    def _record_payment_change(
+            self,
+            booking: Booking,
+            from_status: Optional[PaymentStatus],
+            actor_type: AuditActorType,
+            actor_id: Optional[str] = None,
+            reason: Optional[str] = None
+    ) -> None:
+        """Scrive la voce dello storico pagamenti con lo stato e il metodo attuali."""
+        self.payment_history_repository.add(
+            booking_id=booking.id,
+            from_status=from_status,
+            to_status=booking.payment_status,
+            payment_method=booking.payment_method,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
+        )
 
     def _apply_transition(
             self,
@@ -1981,13 +2077,7 @@ class BookingService:
     @staticmethod
     def _is_overlap_violation(error: IntegrityError) -> bool:
         """Riconosce la collisione sull'exclusion constraint fra le altre violazioni."""
-        original = getattr(error, "orig", None)
-        sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
-
-        if sqlstate == _EXCLUSION_VIOLATION_SQLSTATE:
-            return True
-
-        return _OVERLAP_CONSTRAINT in str(original or error)
+        return is_overlap_violation(error)
 
     @staticmethod
     def _describe_conflicts(conflicts: Sequence[BookingRoomItem]) -> str:
@@ -2071,7 +2161,9 @@ class BookingService:
         # stato (o creato la prenotazione) deve vedere nella risposta anche la
         # voce appena scritta, che la relazione già caricata non conosce.
         # Senza, la risposta era incompleta e il client doveva rileggere.
-        await self.session.refresh(booking, ["created_at", "updated_at", "status_history"])
+        await self.session.refresh(
+            booking, ["created_at", "updated_at", "status_history", "payment_history"]
+        )
 
         history: List[BookingStatusHistorySchema] = []
         if "status_history" in booking.__dict__:
@@ -2079,6 +2171,10 @@ class BookingService:
                 BookingStatusHistorySchema.model_validate(entry)
                 for entry in booking.status_history
             ]
+        payment_history = [
+            BookingPaymentHistorySchema.model_validate(entry)
+            for entry in booking.__dict__.get("payment_history", [])
+        ]
 
         return BookingSchema(
             id=booking.id,
@@ -2117,4 +2213,25 @@ class BookingService:
             # come created_at/updated_at.
             version=booking.version,
             status_history=history,
+            payment_history=payment_history,
         )
+
+
+def build_booking_service(session: AsyncSession) -> BookingService:
+    """
+    Compone un `BookingService` completo su una sessione.
+
+    Unico punto di composizione: lo usano il provider delle rotte
+    (`get_booking_service`), lo sweeper e i test. Prima erano tre copie, e una
+    dipendenza nuova andava ricordata in tutte e tre — dimenticarne una non dà
+    un errore all'avvio ma al primo uso, in produzione.
+    """
+    return BookingService(
+        session=session,
+        booking_repository=BookingRepository(session),
+        booking_token_repository=BookingTokenRepository(session),
+        booking_status_history_repository=BookingStatusHistoryRepository(session),
+        booking_payment_history_repository=BookingPaymentHistoryRepository(session),
+        room_repository=RoomRepository(session),
+        pricing_service=PricingService(),
+    )

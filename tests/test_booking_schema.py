@@ -444,8 +444,30 @@ class TestAdminPaymentRegistration:
 
     @pytest.mark.parametrize("stato", [PaymentStatus.REFUNDED, PaymentStatus.PENDING])
     def test_rimborso_e_correzione_senza_metodo_accettati(self, stato):
-        schema = AdminPaymentRegistrationSchema(payment_status=stato)
+        schema = AdminPaymentRegistrationSchema(payment_status=stato, reason="Restituito in contanti")
         assert schema.payment_method is None
+
+    @pytest.mark.parametrize("stato", [PaymentStatus.REFUNDED, PaymentStatus.PENDING])
+    @pytest.mark.parametrize("motivazione", [None, "", "   "])
+    def test_rimborso_e_correzione_senza_motivazione_rifiutati(self, stato, motivazione):
+        with pytest.raises(ValidationError, match="motivazione è obbligatoria"):
+            AdminPaymentRegistrationSchema(payment_status=stato, reason=motivazione)
+
+    def test_incasso_senza_motivazione_accettato(self):
+        schema = AdminPaymentRegistrationSchema(
+            payment_status=PaymentStatus.PAID, payment_method=PaymentMethod.CASH_ON_SITE
+        )
+        assert schema.reason is None
+
+    def test_motivazione_ripulita_dagli_spazi(self):
+        schema = AdminPaymentRegistrationSchema(
+            payment_status=PaymentStatus.REFUNDED, reason="  Bonifico del 10/10  "
+        )
+        assert schema.reason == "Bonifico del 10/10"
+
+    def test_motivazione_troppo_lunga_rifiutata(self):
+        with pytest.raises(ValidationError):
+            AdminPaymentRegistrationSchema(payment_status=PaymentStatus.REFUNDED, reason="a" * 501)
 
 
 # ===========================================================================
