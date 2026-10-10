@@ -25,7 +25,9 @@ from typing import Annotated, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config.database_config import get_async_session
 from src.data.enumerators import BookingSortOrder, BookingStatus
 from src.data.model.user import User
 from src.data.schemas.booking_schema import (
@@ -37,6 +39,8 @@ from src.data.schemas.booking_schema import (
     BookingSearchFiltersSchema,
     BookingStatusUpdateSchema,
     PaginatedBookingsSchema,
+    PlanningRequestSchema,
+    PlanningSchema,
     SweepResultSchema,
 )
 from src.routers.booking_router import schedule_creation_email, get_booking_service
@@ -46,6 +50,7 @@ from src.service.booking_expiration_service import (
     BookingExpirationService,
     build_expiration_service,
 )
+from src.service.booking_planning_service import BookingPlanningService, build_planning_service
 from src.service.booking_service import BookingService
 from src.service.email.email_service import get_email_service
 
@@ -110,6 +115,26 @@ def get_expiration_service() -> BookingExpirationService:
     return build_expiration_service()
 
 
+def get_planning_service(
+        db: AsyncSession = Depends(get_async_session),
+) -> BookingPlanningService:
+    """Fornisce il servizio del tabellone, composto da `build_planning_service`."""
+    return build_planning_service(db)
+
+
+def get_planning_request(
+        date_from: date = Query(..., description="Primo giorno della finestra (YYYY-MM-DD), incluso"),
+        date_to: date = Query(..., description="Fine della finestra (YYYY-MM-DD), esclusa"),
+) -> PlanningRequestSchema:
+    """
+    Converte i parametri di query nello schema del tabellone.
+
+    Come per l'elenco, `build_request_model` fa sì che un errore sui
+    parametri resti un `422` del client.
+    """
+    return build_request_model(PlanningRequestSchema, date_from=date_from, date_to=date_to)
+
+
 # --------------------------------------------------------------------------- #
 # Consultazione                                                                #
 # --------------------------------------------------------------------------- #
@@ -130,6 +155,31 @@ async def list_bookings(
     l'intera pagina invece di una per prenotazione.
     """
     return await service.search(filters)
+
+
+@admin_booking_router.get(
+    "/planning",
+    response_model=PlanningSchema,
+    summary="Tabellone: camere e soggiorni di un periodo",
+)
+async def get_planning(
+        request: Annotated[PlanningRequestSchema, Depends(get_planning_request)],
+        service: Annotated[BookingPlanningService, Depends(get_planning_service)],
+) -> PlanningSchema:
+    """
+    Camere ordinate per numero e, per ciascuna, i soggiorni che la occupano
+    nella finestra `[date_from, date_to)` — al massimo
+    `planning_max_window_days` giorni, passato compreso.
+
+    Compaiono solo le notti **occupate**, con la stessa regola di
+    disponibilità e calendario: annullate, scadute, non presentate e attese
+    con blocco scaduto si cercano dall'elenco.
+
+    ⚠️ Dichiarata **prima** di `/{booking_id}`: le rotte si confrontano in
+    ordine, e «planning» verrebbe altrimenti letto come un identificativo
+    (con un `422` invece del tabellone).
+    """
+    return await service.get_planning(request)
 
 
 @admin_booking_router.get(

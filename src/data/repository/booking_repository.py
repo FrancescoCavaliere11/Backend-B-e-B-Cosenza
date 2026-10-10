@@ -25,7 +25,7 @@ from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import contains_eager, selectinload
 
 from src.data.enumerators import (
     OCCUPYING_BOOKING_STATUSES,
@@ -296,6 +296,31 @@ class BookingRepository:
 
         result = await self.session.execute(query)
         return [(row.check_in, row.check_out) for row in result.all()]
+
+    async def get_planning_items(
+            self,
+            date_from: date,
+            date_to: date
+    ) -> List[BookingRoomItem]:
+        """
+        Righe camera che occupano la finestra `[date_from, date_to)`, con la
+        prenotazione già caricata (tabellone del back-office).
+
+        Usa `_occupying_item_conditions`, come disponibilità e calendario: il
+        tabellone mostra esattamente le notti che il sistema considera prese.
+        La prenotazione arriva con la stessa query (`contains_eager` sulla
+        join), quindi nessuna lettura aggiuntiva per riga.
+        """
+        query = (
+            select(BookingRoomItem)
+            .join(Booking, Booking.id == BookingRoomItem.booking_id)
+            .options(contains_eager(BookingRoomItem.booking))
+            .where(*self._occupying_item_conditions(date_from, date_to))
+            .order_by(BookingRoomItem.check_in, BookingRoomItem.id)
+        )
+
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
     async def get_active_overlapping_items(
             self,

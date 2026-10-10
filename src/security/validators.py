@@ -195,6 +195,27 @@ def validate_occupancy_window(date_from: date, date_to: date) -> None:
         raise ValueError("Il periodo richiesto va oltre il limite di prenotazione")
 
 
+def validate_planning_window(date_from: date, date_to: date) -> None:
+    """
+    Valida la finestra del tabellone del back-office.
+
+    La finestra è `[date_from, date_to)`, come arrivo e partenza. A differenza
+    del calendario pubblico (`validate_occupancy_window`) il passato è
+    ammesso: l'admin consulta anche i soggiorni conclusi. Resta il tetto di
+    `planning_max_window_days` giorni, perché la risposta contiene i nomi
+    degli ospiti.
+
+    :raises ValueError: se una delle regole non è rispettata.
+    """
+    if date_to <= date_from:
+        raise ValueError("La data finale deve essere successiva a quella iniziale")
+
+    if (date_to - date_from).days > settings.planning_max_window_days:
+        raise ValueError(
+            f"Il periodo richiesto non può superare {settings.planning_max_window_days} giorni"
+        )
+
+
 def validate_room_ids_list(value: List[UUID]) -> List[UUID]:
     """
     Valida la lista delle camere richieste.

@@ -362,6 +362,7 @@ Porta a `EXPIRED` le prenotazioni temporanee il cui blocco è scaduto. Parte con
 | 15 | `POST` | `/{booking_id}/payment` | Registrazione incasso manuale |
 | 16 | `POST` | `/{booking_id}/extend-hold` | Proroga del blocco temporaneo |
 | 17 | `POST` | `/sweep-expired` | Esecuzione immediata dello sweeper delle scadenze |
+| **18** | `GET` | `/planning` | Tabellone: camere e soggiorni di un periodo *(dal 09/10/2026)* |
 
 ---
 
@@ -997,6 +998,51 @@ curl -i -X POST http://localhost:8000/api/v1/admin/bookings/sweep-expired \
 
 ---
 
+### 18 · `GET /api/v1/admin/bookings/planning` *(dal 09/10/2026)*
+
+**Tabellone del back-office: camere e soggiorni di un periodo.**
+
+| | |
+|:--|:--|
+| **Accesso** | Admin |
+| **Query** | `date_from` (incluso) · `date_to` (escluso), formato `YYYY-MM-DD` |
+| **Risposta** | `PlanningSchema` |
+
+**Codici**: `200` · `401` · `403` · `422` date mancanti, `date_to` non successiva a `date_from`, finestra oltre `PLANNING_MAX_WINDOW_DAYS` (62)
+
+**Logica.** Restituisce le camere ordinate per numero e, separatamente, i soggiorni che le **occupano** nella finestra: una voce (`PlanningStaySchema`) per ogni camera di ogni prenotazione. Il client li dispone sulle righe con `room_id`.
+
+- **Quali soggiorni.** La regola è `_occupying_item_conditions`, la stessa di disponibilità, conflitti e calendario pubblico: compaiono le prenotazioni in attesa **con blocco valido**, confermate, con ospite arrivato e concluse (anche con partenza anticipata, perché le notti restano occupate). **Non** compaiono annullate, scadute, non presentate e attese con blocco scaduto: le loro notti sono libere. Per costruzione due soggiorni della stessa camera non si sovrappongono mai (vincolo anti-overbooking). Le prenotazioni escluse si cercano dall'elenco (endpoint 10).
+- **Quali camere.** Tutte quelle in vendita, più le disattivate che hanno soggiorni nella finestra: altrimenti quelle barre non avrebbero una riga.
+- **Date.** Quelle reali della riga camera, anche quando sporgono dalla finestra: il ritaglio è un problema di disegno e spetta al client. Il giorno di partenza non è occupato, quindi un soggiorno che parte il primo giorno della finestra non compare.
+- **Passato.** Ammesso, a differenza del calendario pubblico: l'admin rivede anche i soggiorni conclusi.
+- **Dati personali.** Solo nome e cognome e numero di ospiti: **niente email né telefono**, che restano nel dettaglio (endpoint 11). Il tabellone elenca molti ospiti insieme, e il tetto alla finestra impedisce di scaricare l'anagrafica di un anno in una richiesta.
+- **Prestazioni.** Una query per le righe camera con la prenotazione in `JOIN` (`contains_eager`), una per le camere.
+
+**Ordine delle rotte.** `/planning` è dichiarata **prima** di `/{booking_id}`: le rotte si confrontano in ordine, e «planning» verrebbe altrimenti letto come un identificativo, con un `422`.
+
+**Test**: `tests/test_planning_api.py` (14) — `401`/`403`; finestra invertita, vuota, oltre il limite, passato ammesso; risposta vuota e camere ordinate; una barra per camera con i dati attesi; nessuna email né telefono; soggiorno a cavallo del bordo con date reali; partenza il primo giorno esclusa; attesa valida inclusa e scaduta esclusa; annullata esclusa; non presentato escluso e conclusa inclusa; camera disattivata solo se ha soggiorni.
+
+```bash
+curl -b cookies.txt "http://localhost:8000/api/v1/admin/bookings/planning?date_from=2026-10-08&date_to=2026-10-22"
+```
+
+```json
+{
+  "date_from": "2026-10-08",
+  "date_to": "2026-10-22",
+  "rooms": [{"id": "…", "number": 101, "name": "Camera Girasole", "enabled": true}],
+  "stays": [{
+    "booking_id": "…", "code": "BB-2026-000123", "room_id": "…",
+    "check_in": "2026-10-12", "check_out": "2026-10-15",
+    "status": "CONFIRMED", "payment_status": "PENDING",
+    "guest_name": "Mario Rossi", "guest_count": 2, "hold_expires_at": null
+  }]
+}
+```
+
+---
+
 ## 5. Schemi
 
 ### 5.1 Richiesta
@@ -1196,6 +1242,18 @@ Contenitore: `items[]`, `total`, `page`, `page_size`, `pages`.
 
 ---
 
+#### `PlanningSchema` · `PlanningRoomSchema` · `PlanningStaySchema` *(dal 09/10/2026)*
+
+| Schema | Campi |
+|:--|:--|
+| `PlanningSchema` | `date_from` · `date_to` · `rooms` · `stays` |
+| `PlanningRoomSchema` | `id` · `number` · `name` · `enabled` |
+| `PlanningStaySchema` | `booking_id` · `code` · `room_id` · `check_in` · `check_out` (della riga camera) · `status` · `payment_status` · `guest_name` (nome e cognome) · `guest_count` · `hold_expires_at` (solo per le attese) |
+
+Richiesta: `PlanningRequestSchema` (`date_from`, `date_to`), validata da `validate_planning_window`.
+
+---
+
 ## 6. Enumerazioni
 
 ### `BookingStatus`
@@ -1263,6 +1321,7 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 | `test_admin_booking_api.py` | 64 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga**, cronologia nelle risposte, email della conferma dall'admin, **partenza anticipata e mancata presentazione**, **storico dei pagamenti**, **conferma con notti rivendute** |
 | `test_room_api.py` | 3 | sì | Una camera con prenotazioni non si elimina, nemmeno se disattivata |
 | `test_email_service.py` | 36 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale, **testi coerenti con le regole**, formato dei termini |
+| `test_planning_api.py` | 14 | sì | Tabellone: accesso, finestra, quali soggiorni compaiono (stessa regola della disponibilità), camere disattivate, **nessuna email né telefono** |
 | `test_booking_expiration.py` | 19 | sì | Transizione a `EXPIRED`, slot riprenotabile, idempotenza, soglia di notifica, endpoint admin, scadenza e pulizia dei token |
 | **Totale eseguito** | **~250** | | il test di concorrenza è parametrizzato su 10 iterazioni. I test dei pagamenti sono contati in `payment_api.md` |
 
@@ -1456,6 +1515,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 09/10/2026 | **—** | **Nuovo `GET /admin/bookings/planning`** (endpoint 18): camere e soggiorni che le occupano in una finestra di al massimo 62 giorni (`planning_max_window_days`), passato compreso, senza email né telefono. Stessa regola di occupazione della disponibilità. Nuovo `BookingPlanningService` (sola lettura, composto da `build_planning_service`). +14 test |
 | 09/10/2026 | **—** | **Difetto: la conferma dall'admin di una prenotazione con blocco scaduto e notti rivendute rispondeva `500`** — ora `409` `RoomNotAvailable` e la prenotazione resta in attesa. **Nuovo handler globale su `IntegrityError`**: `409` per sovrapposizione, duplicato e riferimento mancante, `500` per il resto, mai SQL né parametri nella risposta o nei log. Riconoscimento SQLSTATE unificato in `src/data/integrity_errors.py`. +1 test admin, +3 handler |
 | 09/10/2026 | **—** | **Storico dei pagamenti**: nuova tabella `booking_payment_history` (migrazione `b5e8d2c47a19`) e `BookingSchema.payment_history`; un unico punto cambia `payment_status` (`_set_payment_status`) e lascia la voce, per incassi e rimborsi manuali, creazione già pagata ed esiti di Stripe. `POST /admin/bookings/{id}/payment`: **`reason` obbligatoria per rimborso e correzione**. Composizione del `BookingService` unificata (`build_booking_service`). +8 test admin, +2 pagamenti, +9 schema |
 | 07/10/2026 | **—** | `POST /admin/bookings/{id}/status`: **partenza anticipata** ammessa dal giorno dopo l'arrivo, con motivazione obbligatoria (nuova `StatusChangeReasonRequired`, `422`); le notti rimaste restano occupate. **`NO_SHOW` libera le camere** (fuori da `OCCUPYING_BOOKING_STATUSES`); migrazione dati `a7c3e91f5d20` per le prenotazioni già segnate. +6 test |

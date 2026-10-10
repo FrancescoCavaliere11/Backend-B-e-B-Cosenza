@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     #: l'occupazione di un anno intero in una richiesta sola è un'informazione
     #: commerciale della struttura, non un dato che serve a chi prenota.
     occupancy_max_window_days: int = 92
+    #: Ampiezza massima, in giorni, della finestra di `GET /admin/bookings/planning`.
+    #:
+    #: Il tabellone del back-office ne chiede al più un mese (31 giorni): 62
+    #: lascia margine senza permettere di scaricare l'anagrafica di un anno
+    #: intero in una richiesta sola.
+    planning_max_window_days: int = 62
     #: Prefisso del codice prenotazione leggibile (es. "BB-2026-000123").
     booking_code_prefix: str = "BB"
     #: Intervallo di esecuzione dello sweeper delle prenotazioni scadute.

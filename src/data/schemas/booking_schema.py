@@ -41,6 +41,7 @@ from src.security.validators import (
     validate_guest_lastname,
     validate_honeypot,
     validate_occupancy_window,
+    validate_planning_window,
     validate_phone_number,
     validate_room_ids_list,
     validate_terms_accepted,
@@ -839,6 +840,77 @@ class SweepResultSchema(CustomModel):
     expired_count: int = Field(description="Prenotazioni portate a EXPIRED")
     notified_count: int = Field(description="Ospiti avvisati via email")
     swept_at: datetime = Field(description="Istante di esecuzione, in UTC")
+
+
+# ===========================================================================
+# Tabellone del back-office
+# ===========================================================================
+
+class PlanningRequestSchema(CustomModel):
+    """
+    Finestra del tabellone: `[date_from, date_to)`, `date_to` esclusa come la
+    data di partenza di un soggiorno. Il passato è ammesso.
+    """
+
+    date_from: date
+    date_to: date
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "PlanningRequestSchema":
+        validate_planning_window(self.date_from, self.date_to)
+        return self
+
+
+class PlanningRoomSchema(CustomModel):
+    """Riga del tabellone."""
+
+    id: UUID
+    number: int
+    name: str
+    #: Una camera disattivata compare solo se ha soggiorni nella finestra.
+    enabled: bool
+
+
+class PlanningStaySchema(CustomModel):
+    """
+    Barra del tabellone: **una per camera** di ogni prenotazione.
+
+    Contiene solo ciò che si vede sulla barra e serve a riconoscerla. Email e
+    telefono restano nel dettaglio (`GET /admin/bookings/{id}`): il tabellone
+    elenca molti ospiti insieme, e meno dati personali porta meglio è.
+
+    Le date sono quelle reali, anche quando sporgono dalla finestra: il
+    ritaglio è un problema di disegno e spetta al client.
+    """
+
+    booking_id: UUID
+    code: str
+    room_id: UUID
+    check_in: date
+    check_out: date
+    status: BookingStatus
+    payment_status: PaymentStatus
+    guest_name: str = Field(description="Nome e cognome dell'ospite")
+    guest_count: int
+    #: Valorizzato solo per le prenotazioni in attesa: scadenza del blocco.
+    hold_expires_at: Optional[datetime] = None
+
+
+class PlanningSchema(CustomModel):
+    """
+    Camere e soggiorni di una finestra di date.
+
+    Compaiono solo i soggiorni che **occupano** le camere, con la stessa
+    definizione di disponibilità e calendario: annullate, scadute, non
+    presentate e prenotazioni in attesa con blocco scaduto non ci sono, perché
+    le loro notti sono libere. Per questo due barre della stessa camera non si
+    sovrappongono mai (vincolo anti-overbooking del database).
+    """
+
+    date_from: date
+    date_to: date
+    rooms: List[PlanningRoomSchema] = Field(default_factory=list)
+    stays: List[PlanningStaySchema] = Field(default_factory=list)
 
 
 # ===========================================================================
