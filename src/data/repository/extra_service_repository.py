@@ -1,5 +1,4 @@
 from typing import List
-from unittest import result
 from uuid import UUID
 
 from sqlalchemy import select
@@ -7,7 +6,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.model.extra_service import ExtraService
-from src.exception.custom_exception import EntityNotFound
 
 
 class ExtraServiceRepository:

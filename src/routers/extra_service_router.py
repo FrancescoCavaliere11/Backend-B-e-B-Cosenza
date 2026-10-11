@@ -1,7 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status, Form, File, UploadFile, HTTPException
-from pydantic import ValidationError
+from fastapi import APIRouter, Depends, status, Form, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Annotated, List, Optional
 import json

@@ -1,6 +1,6 @@
 from src.config.database_config import Base
 import uuid
-from typing import List
+from typing import TYPE_CHECKING, List
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import Numeric, SmallInteger, Text, UUID, Boolean
 from decimal import Decimal
@@ -11,6 +11,12 @@ from src.security.audit_logging import Auditable
 # referenzia per nome come `secondary`. `booking_room_item.py` non importa
 # `room.py`, quindi non si crea un ciclo.
 from src.data.model.booking_room_item import BookingRoomItem  # noqa: F401
+
+# Solo per l'analisi statica: a runtime i modelli si importano a vicenda,
+# e le relazioni scritte come stringa le risolve SQLAlchemy (#17).
+if TYPE_CHECKING:
+    from src.data.model.booking import Booking
+    from src.data.model.room_service import RoomService
 
 
 class Room(Base, Auditable):

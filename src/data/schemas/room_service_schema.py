@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 from uuid import UUID
 
 from src.config.schemas_config import CustomModel
@@ -27,5 +27,4 @@ class RoomServiceSchema(CustomModel):
     id: UUID
     name: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

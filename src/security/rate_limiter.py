@@ -17,7 +17,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from typing import Deque, Dict, Optional, Tuple
+from typing import Deque, Dict, Tuple
 
 from fastapi import Request
 

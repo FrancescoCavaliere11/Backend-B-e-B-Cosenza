@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from src.config.schemas_config import CustomModel
 from src.security.validators import validate_extra_service_name, validate_extra_service_description
@@ -13,8 +13,7 @@ class ExtraServiceSchema(CustomModel):
     img_url: str
     description: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExtraServiceCreateSchema(CustomModel):

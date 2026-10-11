@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import (
     CheckConstraint,
@@ -38,6 +38,12 @@ from src.data.model.booking_room_item import BookingRoomItem  # noqa: F401
 from src.data.model.booking_token import BookingToken  # noqa: F401
 from src.data.model.booking_status_history import BookingStatusHistory  # noqa: F401
 from src.data.model.booking_payment_history import BookingPaymentHistory  # noqa: F401
+
+# Solo per l'analisi statica: a runtime i modelli si importano a vicenda,
+# e le relazioni scritte come stringa le risolve SQLAlchemy (#17).
+if TYPE_CHECKING:
+    from src.data.model.user import User
+    from src.data.model.room import Room
 
 
 class Booking(Base, Auditable):

@@ -1,4 +1,5 @@
 import uuid
+from typing import TYPE_CHECKING
 from datetime import date
 from decimal import Decimal
 
@@ -21,6 +22,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.config.database_config import Base
 from src.security.audit_logging import Auditable
+
+# Solo per l'analisi statica: a runtime i modelli si importano a vicenda,
+# e le relazioni scritte come stringa le risolve SQLAlchemy (#17).
+if TYPE_CHECKING:
+    from src.data.model.booking import Booking
+    from src.data.model.room import Room
 
 
 class BookingRoomItem(Base, Auditable):

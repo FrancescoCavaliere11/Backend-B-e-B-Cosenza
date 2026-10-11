@@ -476,6 +476,31 @@ async def test_la_conferma_di_incasso_successiva_non_duplica(
     assert email_backend.messages == []
 
 
+async def test_la_rete_di_sicurezza_rilegge_la_carta_da_stripe(
+        api_client, rooms, session, stripe_gateway
+):
+    """
+    Processo morto fra autorizzazione e incasso: arriva solo
+    `payment_intent.succeeded`. Nei webhook `latest_charge` è un semplice
+    identificativo, quindi circuito e ultime cifre vanno riletti da Stripe —
+    altrimenti la prenotazione verrebbe confermata con la carta vuota (#24).
+    """
+    prenotazione = await _crea_prenotazione_da_pagare(api_client, rooms[0].id)
+    await _avvia_pagamento(api_client, prenotazione["code"])
+
+    intent_id = list(stripe_gateway.intents)[0]
+    stripe_gateway.authorize(intent_id)
+    intent = {**_intent_autorizzato(intent_id), "latest_charge": "ch_solo_identificativo"}
+
+    response = await _notifica(api_client, _evento("payment_intent.succeeded", intent))
+
+    assert response.status_code == 200, response.text
+    assert ("retrieve", intent_id, None) in stripe_gateway.calls
+    confermata = await _ricarica(session, prenotazione["code"])
+    assert confermata.status == BookingStatus.CONFIRMED
+    assert (confermata.card_brand, confermata.card_last4) == ("visa", "4242")
+
+
 # ===========================================================================
 # Verifiche di sicurezza
 # ===========================================================================

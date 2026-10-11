@@ -230,12 +230,55 @@ class TestGuestData:
             GuestDataSchema(**{**VALID_GUEST, "email": "non-una-email"})
 
     def test_telefono_non_numerico_rifiutato(self):
-        with pytest.raises(ValidationError, match="solo numeri"):
+        with pytest.raises(ValidationError, match="solo cifre"):
             GuestDataSchema(**{**VALID_GUEST, "phone_number": "333123456a"})
 
-    def test_telefono_di_lunghezza_errata_rifiutato(self):
+    def test_telefono_troppo_corto_rifiutato(self):
         with pytest.raises(ValidationError):
             GuestDataSchema(**{**VALID_GUEST, "phone_number": "333"})
+
+
+class TestInternationalPhone:
+    """
+    Telefono dell'ospite: qualunque Paese, salvato in E.164 (debito #32).
+    Per l'Italia solo cellulari a 10 cifre (decisione del 10/10/2026).
+    """
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("3331234567", "+393331234567"),           # italiano senza prefisso: come prima
+        ("+39 333 123 4567", "+393331234567"),
+        ("0039 333-123-4567", "+393331234567"),    # 00 al posto di +
+        ("+44 20 7946 0958", "+442079460958"),
+        ("+1 (212) 555-0100", "+12125550100"),
+        ("+49.30.1234567", "+49301234567"),
+        (" +33 1 23 45 67 89 ", "+33123456789"),   # spazi ai bordi tollerati
+    ])
+    def test_numeri_validi_normalizzati(self, raw, expected):
+        assert GuestDataSchema(**{**VALID_GUEST, "phone_number": raw}).phone_number == expected
+
+    @pytest.mark.parametrize("raw", [
+        "+39 333 12a 4567",       # lettere
+        "+0 333 1234567",         # il prefisso non inizia con 0
+        "+1 234",                 # troppo corto
+        "+39 1234 5678 9012 345", # oltre 15 cifre
+        "++39 3331234567",        # «+» ripetuto
+        "333+1234567",            # «+» in mezzo
+        "0984 123456",            # fisso italiano: solo cellulari
+        "+39 0984 1234567",       # fisso italiano con prefisso
+        "333 123456",             # cellulare italiano a 9 cifre (vecchio formato)
+        "+39 333 123 45678",      # cellulare italiano a 11 cifre
+    ])
+    def test_numeri_non_validi_rifiutati(self, raw):
+        with pytest.raises(ValidationError):
+            GuestDataSchema(**{**VALID_GUEST, "phone_number": raw})
+
+    def test_per_l_italia_il_messaggio_chiede_un_cellulare(self):
+        with pytest.raises(ValidationError, match="cellulare"):
+            GuestDataSchema(**{**VALID_GUEST, "phone_number": "0984 123456"})
+
+    def test_il_messaggio_d_errore_e_in_italiano(self):
+        with pytest.raises(ValidationError, match="prefisso internazionale"):
+            GuestDataSchema(**{**VALID_GUEST, "phone_number": "+0 333 1234567"})
 
     def test_spazi_esterni_nel_nome_rifiutati(self):
         with pytest.raises(ValidationError, match="spazi"):

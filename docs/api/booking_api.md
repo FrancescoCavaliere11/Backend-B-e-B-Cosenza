@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **9 ottobre 2026** · Copertura: Step A → G
+Versione API `v1` · Documento aggiornato al **10 ottobre 2026** · Copertura: Step A → G
 
 > I pagamenti online hanno un documento proprio: `payment_api.md`.
 
@@ -1072,7 +1072,7 @@ curl -b cookies.txt "http://localhost:8000/api/v1/admin/bookings/planning?date_f
 | `firstname` | string | sì | 2–50 caratteri, senza spazi esterni |
 | `lastname` | string | sì | 2–50 caratteri, senza spazi esterni |
 | `email` | string | sì | email valida (RFC) |
-| `phone_number` | string | sì | esattamente 10 cifre numeriche |
+| `phone_number` | string | sì | *(dal 10/10/2026)* qualunque Paese: 4–25 caratteri in ingresso, con spazi, trattini, punti, barre e parentesi tollerati; `00` vale come `+`; **senza prefisso si assume l'Italia (+39)**. Salvato **normalizzato in E.164** (`+393331234567`, al massimo 15 cifre dopo il `+`). **Per l'Italia solo cellulari**: `+39`, poi `3` e altre nove cifre (fissi e vecchi cellulari a 9 cifre rifiutati). Per gli altri Paesi solo la forma; la lunghezza del numero nazionale (10 cifre per tutti, per ora) la controlla il form (debito #40). Prima: esattamente 10 cifre italiane |
 
 #### `GuestBookingCreateSchema`
 
@@ -1311,14 +1311,14 @@ Perché l'ospite non può cancellare da sé. Compare in `blocked_by` di `POST /m
 
 | File | Test | Database | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_booking_schema.py` | 77 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale** |
+| `test_booking_schema.py` | 96 | no | Vincoli dei DTO: date, capienza, XOR utente/ospite, honeypot, normalizzazione codice, **coerenza del pagamento admin, contratto dell'incasso manuale**, **telefono internazionale (validi, non validi, normalizzazione)** |
 | `test_pricing_service.py` | 17 | no | Sconti, arrotondamento `ROUND_HALF_UP`, assenza di `float`, quote token, penali |
 | `test_availability_combinations.py` | 15 | no | Minimalità, ordinamento, limiti, euristica su inventari ampi; notti del calendario (giorno di partenza libero, unione, ritaglio) |
 | `test_occupancy_api.py` | 18 | sì | Calendario: notti occupate, giorno di partenza libero, unione fra camere, blocco scaduto, annullate e scadute, ritaglio sulla finestra, `404`/`409`/`422`/`429`, **coerenza con `/availability`** |
 | `test_booking_service.py` | 14 | sì | **Concorrenza (eseguita 10 volte)**, ciclo di vita, transizioni, hold scaduto, back-to-back |
 | `test_booking_api.py` | 34 | sì | Flusso end-to-end, rate limit, protezioni, autorizzazione, **persistenza**, **email**, pagina di gestione (5 di essi sospesi con le rotte `/me`) |
 | `test_exception_handler.py` | 9 | no | Errore del client (`422`) contro errore del server (`500`), cosa non finisce nella risposta, nome del campo negli errori su liste, **violazioni di vincolo (`409`/`500`) senza SQL né dati dell'ospite** |
-| `test_admin_booking_api.py` | 64 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga**, cronologia nelle risposte, email della conferma dall'admin, **partenza anticipata e mancata presentazione**, **storico dei pagamenti**, **conferma con notti rivendute** |
+| `test_admin_booking_api.py` | 66 | sì | Autorizzazione, creazione on-behalf-of, assenza della rotta di modifica, stato, **transizioni negate all'admin**, **regole dell'incasso manuale**, riga di audit, **ordinamento e contenuto della riga**, cronologia nelle risposte, email della conferma dall'admin, **partenza anticipata e mancata presentazione**, **storico dei pagamenti**, **conferma con notti rivendute**, **telefono salvato in E.164** |
 | `test_room_api.py` | 3 | sì | Una camera con prenotazioni non si elimina, nemmeno se disattivata |
 | `test_email_service.py` | 36 | no | Rendering dei template, escaping, link, mascheramento nei log, robustezza del canale, **testi coerenti con le regole**, formato dei termini |
 | `test_planning_api.py` | 14 | sì | Tabellone: accesso, finestra, quali soggiorni compaiono (stessa regola della disponibilità), camere disattivate, **nessuna email né telefono** |
@@ -1515,6 +1515,8 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 10/10/2026 | **—** | **Telefono dell'ospite internazionale** (debito #32): `GuestDataSchema.phone_number` accetta numeri di qualunque Paese e li salva normalizzati in E.164 (`validate_international_phone`); senza prefisso si assume +39, quindi i numeri a 10 cifre restano validi. Migrazione dati `c4d8f2a61b3e`: i `guest_phone` già salvati a 10 cifre diventano `+39…`. **Per l'Italia solo cellulari** (`3` + 9 cifre). Il telefono degli utenti registrati non cambia; i numeri già salvati non vengono rivalidati. +19 test schema, +2 admin. `ruff` in `requirements-dev.txt` |
+| 10/10/2026 | **—** | Pulizia (debito #10–#13, #16–#18): `model_config = ConfigDict(...)` al posto di `class Config` negli schemi delle anagrafiche; costante `HTTP_422_UNPROCESSABLE_CONTENT` (codice invariato); import inutilizzati rimossi; configurazione `ruff.toml`. Nessun cambiamento di comportamento: pytest senza avvisi |
 | 09/10/2026 | **—** | **Nuovo `GET /admin/bookings/planning`** (endpoint 18): camere e soggiorni che le occupano in una finestra di al massimo 62 giorni (`planning_max_window_days`), passato compreso, senza email né telefono. Stessa regola di occupazione della disponibilità. Nuovo `BookingPlanningService` (sola lettura, composto da `build_planning_service`). +14 test |
 | 09/10/2026 | **—** | **Difetto: la conferma dall'admin di una prenotazione con blocco scaduto e notti rivendute rispondeva `500`** — ora `409` `RoomNotAvailable` e la prenotazione resta in attesa. **Nuovo handler globale su `IntegrityError`**: `409` per sovrapposizione, duplicato e riferimento mancante, `500` per il resto, mai SQL né parametri nella risposta o nei log. Riconoscimento SQLSTATE unificato in `src/data/integrity_errors.py`. +1 test admin, +3 handler |
 | 09/10/2026 | **—** | **Storico dei pagamenti**: nuova tabella `booking_payment_history` (migrazione `b5e8d2c47a19`) e `BookingSchema.payment_history`; un unico punto cambia `payment_status` (`_set_payment_status`) e lascia la voce, per incassi e rimborsi manuali, creazione già pagata ed esiti di Stripe. `POST /admin/bookings/{id}/payment`: **`reason` obbligatoria per rimborso e correzione**. Composizione del `BookingService` unificata (`build_booking_service`). +8 test admin, +2 pagamenti, +9 schema |

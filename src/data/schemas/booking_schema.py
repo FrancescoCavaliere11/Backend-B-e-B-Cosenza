@@ -42,7 +42,7 @@ from src.security.validators import (
     validate_honeypot,
     validate_occupancy_window,
     validate_planning_window,
-    validate_phone_number,
+    validate_international_phone,
     validate_room_ids_list,
     validate_terms_accepted,
 )
@@ -258,7 +258,9 @@ class GuestDataSchema(CustomModel):
     firstname: str = Field(min_length=2, max_length=50)
     lastname: str = Field(min_length=2, max_length=50)
     email: EmailStr
-    phone_number: str = Field(min_length=10, max_length=10)
+    #: In ingresso come lo scrive una persona (spazi, trattini, `00`…); salvato
+    #: normalizzato in E.164 (`+393331234567`). Senza prefisso vale l'Italia.
+    phone_number: str = Field(min_length=4, max_length=25)
 
     @field_validator("firstname")
     @classmethod
@@ -273,7 +275,7 @@ class GuestDataSchema(CustomModel):
     @field_validator("phone_number")
     @classmethod
     def validate_phone(cls, value: str) -> str:
-        return validate_phone_number(value)
+        return validate_international_phone(value)
 
 
 # ===========================================================================

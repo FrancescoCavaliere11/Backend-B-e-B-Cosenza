@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UUID, func
 from sqlalchemy import Enum as SQLEnum
@@ -8,6 +8,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.config.database_config import Base
 from src.data.enumerators import AuditActorType, BookingStatus
+
+# Solo per l'analisi statica: a runtime i modelli si importano a vicenda,
+# e le relazioni scritte come stringa le risolve SQLAlchemy (#17).
+if TYPE_CHECKING:
+    from src.data.model.booking import Booking
 
 
 class BookingStatusHistory(Base):

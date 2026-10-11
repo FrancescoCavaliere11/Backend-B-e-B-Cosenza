@@ -7,7 +7,7 @@ dell'ospite non possono iniettare markup, e un disservizio del canale non si
 propaga a chi ha chiamato.
 """
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 

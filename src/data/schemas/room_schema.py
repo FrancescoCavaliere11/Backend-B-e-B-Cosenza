@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator
 from decimal import Decimal
 from typing import List
 from uuid import UUID
@@ -60,5 +60,4 @@ class RoomSchema(CustomModel):
     enabled: bool
     services: List[RoomServiceSchema]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

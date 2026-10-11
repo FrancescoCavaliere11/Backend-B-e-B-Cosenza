@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 from uuid import UUID
@@ -5,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import magic
 
-from fastapi import UploadFile, HTTPException, status
+from fastapi import UploadFile
 
 from src.config.config import settings
 from src.exception.custom_exception import InvalidFileType
@@ -63,6 +64,71 @@ def validate_phone_number(value: str):
     if not value.isdigit():
         raise ValueError("Il numero di telefono deve contenere solo numeri")
     return value
+
+
+#: Prefisso aggiunto ai numeri scritti senza: la struttura è in Italia, e i
+#: numeri a 10 cifre già in uso devono restare validi.
+DEFAULT_PHONE_COUNTRY_CODE = "+39"
+
+#: Formato E.164: «+», prefisso internazionale e numero, al massimo 15 cifre.
+_E164 = re.compile(r"^\+[1-9]\d{6,14}$")
+
+#: Separatori tollerati nella scrittura di un numero.
+_PHONE_SEPARATORS = re.compile(r"[\s\-./()]")
+
+#: Cellulare italiano: inizia con 3 e ha 10 cifre. Solo cellulari (decisione
+#: del 10/10/2026): fissi e vecchi cellulari a 9 cifre sono rifiutati.
+_ITALIAN_MOBILE = re.compile(r"^\+393\d{9}$")
+
+
+def validate_international_phone(value: str) -> str:
+    """
+    Valida un numero di telefono e lo restituisce **normalizzato** in formato
+    internazionale E.164 (`+393331234567`), il formato salvato a database.
+
+    Accetta come lo scrive una persona:
+
+    - spazi, trattini, punti, barre e parentesi (`+1 (212) 555-0100`);
+    - `00` al posto di `+` (`0044 20 7946 0958`);
+    - nessun prefisso: si assume l'Italia (`3331234567` → `+393331234567`).
+
+    Per l'**Italia** accetta solo cellulari: `+39`, poi `3` e altre nove
+    cifre. Per gli altri Paesi solo la forma: da qui non si può sapere dove
+    finisce il prefisso, quindi la lunghezza del numero nazionale (10 cifre)
+    la controlla il form.
+
+    TODO(#40): regole per Paese — lunghezze reali e «solo cellulare» — con la
+    libreria `phonenumbers`. Oggi un cellulare francese (9 cifre) o tedesco a
+    11 cifre non passa dal form.
+
+    :raises ValueError: con un messaggio in italiano, se il numero non è valido.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("Il numero di telefono è obbligatorio")
+
+    compact = _PHONE_SEPARATORS.sub("", raw)
+    if compact.startswith("00"):
+        compact = "+" + compact[2:]
+
+    if compact.startswith("+"):
+        digits = compact[1:]
+        normalized = compact
+    else:
+        digits = compact
+        normalized = DEFAULT_PHONE_COUNTRY_CODE + compact
+
+    if not digits.isdigit():
+        raise ValueError(
+            "Il numero di telefono può contenere solo cifre, il «+» iniziale e separatori come spazi o trattini"
+        )
+    if not _E164.match(normalized):
+        raise ValueError(
+            "Numero di telefono non valido: indica prefisso internazionale e numero, al massimo 15 cifre"
+        )
+    if normalized.startswith(DEFAULT_PHONE_COUNTRY_CODE) and not _ITALIAN_MOBILE.match(normalized):
+        raise ValueError("Per l'Italia serve un numero di cellulare: inizia con 3 e ha 10 cifre")
+    return normalized
 
 
 def validate_password_strength(value: str):

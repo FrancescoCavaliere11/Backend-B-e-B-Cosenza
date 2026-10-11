@@ -1,7 +1,7 @@
 # API REFERENCE — Pagamenti
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **20 settembre 2026** · Copertura: Step G
+Versione API `v1` · Documento aggiornato al **10 ottobre 2026** · Copertura: Step G
 
 ---
 
@@ -83,6 +83,26 @@ Dopo l'incasso conserviamo **circuito e ultime quattro cifre** (`card_brand`,
 `card_last4`), che servono al back-office per riconoscere un pagamento e non
 sono dati di autenticazione.
 
+**Da dove si leggono** *(dal 10/10/2026)*. Dall'addebito più recente del
+Payment Intent, `latest_charge`, che ogni chiamata chiede **espanso**
+(`expand=["latest_charge"]`): senza espansione è solo un identificativo. Una
+funzione sola, `card_details_of`, gestisce le tre forme possibili (oggetto,
+identificativo, assente). Nei webhook `latest_charge` è sempre un
+identificativo: la rete di sicurezza di `payment_intent.succeeded` rilegge
+l'intent da Stripe, e se Stripe non risponde conferma comunque, senza i dati
+della carta (la conferma conta più delle ultime cifre).
+
+> **Confine con la libreria.** Dalla versione 15 `stripe` restituisce oggetti,
+> non dizionari, e senza `.get()`. Tutto ciò che esce dalla libreria passa da
+> `_as_dict` in `gateway.py`, che lo converte con `to_dict()`: il resto del
+> codice vede solo dizionari semplici.
+
+> ⚠️ **Fino al 10/10/2026 questi due campi restavano sempre vuoti** (debito
+> #24). Il codice leggeva `charges`, rimosso da Stripe con l'API `2022-11-15`:
+> nessun errore, nessun test rosso — il gateway finto lavora a valle della
+> lettura — e circuito e cifre a `NULL` su ogni pagamento. I nuovi test in
+> `test_stripe_gateway.py` leggono risposte con la forma reale di Stripe.
+
 **Non conserviamo mai**: PAN completo, CVV, banda magnetica, PIN. Non è una
 promessa: sono dati che non arrivano mai fino a qui.
 
@@ -99,7 +119,7 @@ noi anche se i campi della carta sono iframe di Stripe.
 | `STRIPE_SECRET_KEY` | — | Chiave server. **Mai** nel repository |
 | `STRIPE_WEBHOOK_SECRET` | — | Segreto di firma, diverso dalla chiave server |
 | `STRIPE_AUTO_REFUND_ON_CANCELLATION` | `false` | Rimborso automatico sugli annullamenti dopo la conferma |
-| `STRIPE_WEBHOOK_TOLERANCE_SECONDS` | `300` | Età massima di una firma accettata |
+| `STRIPE_WEBHOOK_TOLERANCE_SECONDS` | `300` | Età massima di una firma accettata (finestra anti-replay). Passata a `construct_event` dal 10/10/2026: prima era ignorata e valeva il predefinito della libreria (#25.2) |
 | `BOOKING_PAYMENT_HOLD_MINUTES` | `30` | Blocco dello slot durante il pagamento |
 
 > `BOOKING_PAYMENT_HOLD_MINUTES` è più lungo di `BOOKING_HOLD_MINUTES` perché
@@ -311,6 +331,16 @@ Per ogni prenotazione in attesa di pagamento con blocco scaduto:
 L'ultimo caso è la scelta prudente: uno slot invenduto per un'ora costa una
 notte, un incasso senza camera costa molto di più.
 
+**Come si capisce «già incassata»** *(dal 10/10/2026)*. Quando Stripe rifiuta
+l'annullamento non si deduce nulla dall'errore: lo stesso
+`InvalidRequestError` copre «già incassato», «già annullato», un identificativo
+inesistente e una richiesta malformata. Il gateway **rilegge l'intent** e
+decide dal suo stato: `succeeded` → già incassata; `canceled` → già
+rilasciata, esito normale; qualsiasi altro stato, o rilettura impossibile →
+gestore irraggiungibile, si riprova. Prima ogni rifiuto diventava «già
+incassata», e un errore qualsiasi poteva interrompere l'intera passata dello
+sweeper (#25.1).
+
 **Vale per entrambi i modi di eseguirlo.** Lo sweeper si esegue in due modi —
 il ciclo in background (ogni `SWEEPER_INTERVAL_SECONDS`) e l'endpoint
 `POST /admin/bookings/sweep-expired` — e sono **la stessa passata**: entrambi
@@ -401,8 +431,11 @@ pagamento di una prenotazione altrui.
 
 | File | Test | DB | Cosa verifica |
 |:--|:--:|:--:|:--|
-| `test_payment_service.py` | 17 | no | Conversione importi, macchina a stati del gateway, firma |
-| `test_payment_api.py` | 19 | sì | Ciclo completo, slot perduto, **prenotazione annullata durante il pagamento**, idempotenza, firma, importo |
+| `test_payment_service.py` | 14 | no | Conversione importi, macchina a stati del gateway, firma |
+| `test_stripe_gateway.py` | 13 | no | **Gateway reale con un modulo `stripe` finto che restituisce oggetti Stripe veri**: dati della carta da `latest_charge` (oggetto, identificativo, assente, vecchio `charges` ignorato), espansione chiesta a ogni chiamata, annullamento rifiutato deciso dallo stato riletto, tolleranza della firma |
+| `test_payment_api.py` | 23 | sì | Ciclo completo, slot perduto, **prenotazione annullata durante il pagamento**, idempotenza, firma, importo, storico dei pagamenti, **carta riletta dalla rete di sicurezza** |
+
+Conteggi per funzione di test; alcune sono parametrizzate.
 
 ### Il test che conta più di tutti
 
@@ -427,7 +460,7 @@ localhost:8000/api/v1/payments/webhook`.
 - [ ] Pagando con `4242 4242 4242 4242` la prenotazione passa a `CONFIRMED`
 - [ ] Arriva l'email di conferma con il link di gestione
 - [ ] Nel cruscotto Stripe l'importo risulta **incassato**, non solo autorizzato
-- [ ] `card_brand` e `card_last4` sono valorizzati; nessun PAN in tabella o nei log
+- [ ] `card_brand` e `card_last4` sono valorizzati (dal 10/10/2026, debito #24); nessun PAN in tabella o nei log
 
 ### Casi limite
 - [ ] Chiamare `/intent` due volte → stesso `client_secret`
@@ -455,6 +488,8 @@ localhost:8000/api/v1/payments/webhook`.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 10/10/2026 | **—** | **Difetto trovato nel collaudo manuale: avvio del pagamento e webhook fallivano con `AttributeError`.** Dalla versione 15 la libreria `stripe` restituisce oggetti (`PaymentIntent`, `Event`) senza `.get()`, e il codice li trattava come dizionari. Ora tutto ciò che esce dalla libreria passa da `_as_dict` (`to_dict()`, oggetti annidati compresi) in `gateway.py`: `_to_result`, `verify_webhook`, `refund`. I test di `test_stripe_gateway.py` usano oggetti Stripe veri (`construct_from`). +2 test |
+| 10/10/2026 | **—** | **Difetto #24: circuito e ultime cifre sempre vuoti** — letti da `latest_charge` espanso invece del campo `charges` rimosso da Stripe; la rete di sicurezza del webhook `succeeded` rilegge l'intent. **#25.1**: un annullamento rifiutato si decide dallo stato riletto, non più «ogni rifiuto = già incassato». **#25.2**: `STRIPE_WEBHOOK_TOLERANCE_SECONDS` passata alla verifica della firma. `LiveStripeGateway` accetta un modulo `stripe` iniettato (test). +11 test gateway, +1 webhook |
 | 09/10/2026 | **—** | Gli esiti di Stripe lasciano una voce nello storico dei pagamenti (`booking_payment_history`, attore `SYSTEM`); evento ripetuto senza effetti = nessuna voce in più |
 | 02/10/2026 | **—** | **Difetto: lo sweeper manuale non rilasciava le autorizzazioni.** `POST /admin/bookings/sweep-expired` esegue ora `sweep_once`, la stessa passata del giro automatico (§6) |
 | 28/09/2026 | **—** | **Nuovo esito `NOT_PAYABLE`**: un'autorizzazione su una prenotazione che non attende più il pagamento (annullata dal back-office durante il checkout) viene rilasciata invece di essere incassata |

@@ -25,11 +25,11 @@ def _create_token(user: User, expires_delta: timedelta, token_type: TokenType) -
             algorithm=settings.jwt_algorithm
         )
         return encoded_jwt
-    except Exception as e:
+    except Exception as error:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Errore durante la generazione del {token_type.value} token"
-        )
+        ) from error
 
 
 def create_access_token(user: User) -> str:
@@ -59,7 +59,7 @@ def _decode_and_validate_token(token: str, expected_type: TokenType) -> dict:
         return payload
 
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        raise credentials_exception
+        raise credentials_exception from None
 
 
 def decode_and_validate_access_token(token: str) -> dict:

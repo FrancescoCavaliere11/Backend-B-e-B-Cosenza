@@ -21,7 +21,8 @@ class UserService:
         try:
             await self.user_repository.save(new_user)
         except IntegrityError:
+            # `from None`: l'errore del driver contiene la query con email e telefono.
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email o numero di telefono già registrati nel sistema."
-            )
+            ) from None

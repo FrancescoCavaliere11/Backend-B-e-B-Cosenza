@@ -33,4 +33,8 @@ __pycache__/
 *.ntvs*
 *.njsproj
 *.sln
-*.swp.DS_Store
+*.swp
+.DS_Store
+.venv-*/
+
+ruff.toml

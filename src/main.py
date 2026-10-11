@@ -16,20 +16,23 @@ from src.routers.payment_router import payment_router
 from src.exception.exception_handler import setup_exception_handler
 from src.service.booking_expiration_service import build_expiration_service
 
-from src.data.model.user import User
-from src.data.model.room import Room
-from src.data.model.booking import Booking
-from src.data.model.room_service_association import room_service_association
-from src.data.model.room_service import RoomService
-from src.data.model.extra_service import ExtraService
+# Import di registrazione: importare un modello lo registra nel registry di
+# SQLAlchemy, ed è ciò che risolve le relazioni scritte come stringa. Non sono
+# inutilizzati: il marcatore noqa F401 impedisce a `ruff --fix` di cancellarli (#16).
+from src.data.model.user import User  # noqa: F401
+from src.data.model.room import Room  # noqa: F401
+from src.data.model.booking import Booking  # noqa: F401
+from src.data.model.room_service_association import room_service_association  # noqa: F401
+from src.data.model.room_service import RoomService  # noqa: F401
+from src.data.model.extra_service import ExtraService  # noqa: F401
 
 # Entità del modulo Booking: l'import le registra nel registry SQLAlchemy
 # prima della configurazione dei mapper.
-from src.data.model.booking_room_item import BookingRoomItem
-from src.data.model.booking_token import BookingToken
-from src.data.model.booking_status_history import BookingStatusHistory
-from src.data.model.booking_payment_history import BookingPaymentHistory
-from src.data.model.stripe_event import StripeEvent
+from src.data.model.booking_room_item import BookingRoomItem  # noqa: F401
+from src.data.model.booking_token import BookingToken  # noqa: F401
+from src.data.model.booking_status_history import BookingStatusHistory  # noqa: F401
+from src.data.model.booking_payment_history import BookingPaymentHistory  # noqa: F401
+from src.data.model.stripe_event import StripeEvent  # noqa: F401
 
 
 # Prima di qualunque cosa: senza questa chiamata i logger del progetto non

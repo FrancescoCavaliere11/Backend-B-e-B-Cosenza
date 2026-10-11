@@ -135,7 +135,7 @@ def setup_exception_handler(app: FastAPI):
             error_message = _build_error_message(raw_errors[0])
 
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={
                 "message": error_message,
                 "details": _sanitize_validation_errors(raw_errors)
@@ -177,7 +177,7 @@ def setup_exception_handler(app: FastAPI):
     @app.exception_handler(JSONDecodeError)
     async def json_decode_exception_handler(request: Request, exc: JSONDecodeError):
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"message": "Il formato dei dati inviati non è valido (JSON corrotto)"},
         )
 

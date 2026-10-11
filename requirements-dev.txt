@@ -14,6 +14,9 @@
 pytest==8.4.2
 pytest-asyncio==1.2.0             # senza, nessun test asincrono parte (asyncio_mode = auto)
 
+# --- Analisi statica ---------------------------------------------------------
+ruff==0.15.11                     # ruff check src tests — configurazione in ruff.toml
+
 # --- Documentazione ----------------------------------------------------------
 markdown==3.11                    # docs/api/build_pdf.py
 

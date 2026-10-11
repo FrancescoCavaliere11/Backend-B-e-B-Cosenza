@@ -1,4 +1,3 @@
-from dns.e164 import query
 from sqlalchemy import select
 from typing import List, Optional
 from uuid import UUID

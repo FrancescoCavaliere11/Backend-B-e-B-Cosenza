@@ -1,8 +1,7 @@
-import json
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import UploadFile, HTTPException, status
+from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.model.extra_service import ExtraService

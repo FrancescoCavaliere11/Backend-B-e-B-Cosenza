@@ -30,7 +30,7 @@ rete di sicurezza del disegno, e il motivo per cui ogni passo è idempotente.
 """
 import hashlib
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +45,7 @@ from src.service.booking_service import BookingService, PaymentOutcome
 from src.service.email.email_service import EmailService, get_email_service
 from src.service.payment.gateway import (
     StripeGateway,
+    card_details_of,
     from_minor_units,
     to_minor_units,
 )
@@ -249,13 +250,31 @@ class PaymentService:
         non fa nulla. Serve come **rete di sicurezza**: se il processo fosse
         morto fra l'incasso e la scrittura, questo evento completerebbe il
         lavoro.
-        """
-        carta = (intent.get("charges") or {}).get("data") or []
-        dettagli = (carta[0].get("payment_method_details") or {}).get("card") or {} if carta else {}
 
-        return await self._finalize(
-            intent["id"], dettagli.get("brand"), dettagli.get("last4")
-        )
+        Nei webhook `latest_charge` è solo l'identificativo dell'addebito, mai
+        l'oggetto: circuito e ultime cifre si rileggono da Stripe. Se Stripe
+        non risponde si conferma lo stesso, senza i dati della carta: la
+        conferma della prenotazione conta più delle ultime quattro cifre, e
+        far fallire il webhook rimanderebbe proprio la conferma.
+        """
+        brand, last4 = card_details_of(intent)
+        if brand is None and last4 is None:
+            brand, last4 = await self._fetch_card_details(intent["id"])
+
+        return await self._finalize(intent["id"], brand, last4)
+
+    async def _fetch_card_details(self, intent_id: str) -> Tuple[Optional[str], Optional[str]]:
+        """Circuito e ultime cifre riletti da Stripe; `(None, None)` se non risponde."""
+        try:
+            letto = await self.gateway.retrieve_payment_intent(intent_id)
+        except Exception as error:
+            logger.warning(
+                "Dati della carta non recuperabili per l'intent %s (%s): conferma senza",
+                intent_id,
+                type(error).__name__,
+            )
+            return None, None
+        return letto.card_brand, letto.card_last4
 
     async def _finalize(
             self,

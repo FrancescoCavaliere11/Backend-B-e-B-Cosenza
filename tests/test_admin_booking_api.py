@@ -128,6 +128,18 @@ class TestCreate:
         assert booking["guest_email"] == GUEST["email"]
         assert booking["user_id"] is None
 
+    async def test_telefono_straniero_salvato_in_formato_internazionale(self, admin_client, rooms):
+        """Debito #32: un ospite inglese si registra, e il numero si salva in E.164."""
+        guest = {**GUEST, "phone_number": "+44 20 7946 0958"}
+        booking = await _create_booking(admin_client, [rooms[0].id], guest=guest)
+
+        assert booking["guest_phone"] == "+442079460958"
+
+    async def test_telefono_italiano_senza_prefisso_riceve_il_39(self, admin_client, rooms):
+        booking = await _create_booking(admin_client, [rooms[0].id])
+
+        assert booking["guest_phone"] == "+39" + GUEST["phone_number"]
+
     async def test_nessun_token_se_si_salta_la_conferma(self, admin_client, rooms):
         response = await admin_client.post(BASE + "/", json=_create_payload([rooms[0].id]))
         assert response.json()["confirmation_token"] is None

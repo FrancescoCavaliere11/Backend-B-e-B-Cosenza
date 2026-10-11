@@ -26,7 +26,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:  # pragma: no cover - dipende dalla versione di Python
     from typing import Protocol
@@ -81,6 +81,51 @@ def from_minor_units(amount: int, currency: str) -> Decimal:
             f"Valuta '{codice}' senza decimali: conversione non supportata"
         )
     return (Decimal(amount) / _HUNDRED).quantize(Decimal("0.01"))
+
+
+#: Espansione chiesta a ogni chiamata che restituisce un Payment Intent: senza,
+#: `latest_charge` è solo un identificativo e i dati della carta non ci sono.
+_EXPAND_CHARGE = ["latest_charge"]
+
+
+def _as_dict(obj: Any) -> Dict[str, Any]:
+    """
+    Confine fra la libreria `stripe` e il nostro codice: tutto ciò che ne esce
+    passa da qui e diventa un dizionario semplice.
+
+    Dalla versione 15 la libreria restituisce oggetti (`PaymentIntent`,
+    `Event`) che **non hanno più `.get()`**: trattarli come dizionari solleva
+    `AttributeError`. `to_dict()` li converte, oggetti annidati compresi
+    (`latest_charge`, `data.object`). Un dizionario passa invariato: è ciò che
+    restituiscono i moduli finti dei test.
+    """
+    if isinstance(obj, dict):
+        return obj
+    return obj.to_dict()
+
+
+def card_details_of(intent: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Circuito e ultime quattro cifre della carta di un Payment Intent.
+
+    Si leggono dall'addebito più recente (`latest_charge`): il vecchio campo
+    `charges` è stato rimosso da Stripe con l'API `2022-11-15`, e leggerlo
+    restituiva sempre niente, in silenzio (debito #24).
+
+    Tre forme possibili di `latest_charge`, tutte gestite:
+
+    - **oggetto** (chiamata con `expand=["latest_charge"]`): i dati ci sono;
+    - **stringa** — l'identificativo dell'addebito, come nei webhook: niente;
+    - **assente** — intent appena creato, nessun addebito ancora: niente.
+
+    :return: `(brand, last4)`, entrambi `None` se non disponibili.
+    """
+    charge = intent.get("latest_charge")
+    if not isinstance(charge, dict):
+        return None, None
+
+    card = (charge.get("payment_method_details") or {}).get("card") or {}
+    return card.get("brand"), card.get("last4")
 
 
 @dataclass(frozen=True)
@@ -147,14 +192,20 @@ class StripeGateway(Protocol):
 class LiveStripeGateway:
     """Implementazione sopra la libreria ufficiale `stripe`."""
 
-    def __init__(self) -> None:
-        import stripe  # import locale: il pacchetto serve solo qui
+    def __init__(self, stripe_module: Any = None) -> None:
+        """
+        :param stripe_module: la libreria `stripe` da usare. Solo per i test,
+            che la sostituiscono con un modulo finto: senza rete, senza chiavi.
+            In produzione si omette e si usa quella installata.
+        """
+        if stripe_module is None:
+            import stripe as stripe_module  # import locale: il pacchetto serve solo qui
 
-        if not settings.stripe_secret_key:
-            raise PaymentGatewayError("stripe_secret_key non configurata")
+            if not settings.stripe_secret_key:
+                raise PaymentGatewayError("stripe_secret_key non configurata")
+            stripe_module.api_key = settings.stripe_secret_key.get_secret_value()
 
-        stripe.api_key = settings.stripe_secret_key.get_secret_value()
-        self._stripe = stripe
+        self._stripe = stripe_module
 
     # ------------------------------------------------------------------ #
     # Payment Intent                                                      #
@@ -182,32 +233,69 @@ class LiveStripeGateway:
             automatic_payment_methods={"enabled": True},
             metadata={"booking_code": booking_code, **(metadata or {})},
             idempotency_key=f"booking-{booking_code}",
+            expand=_EXPAND_CHARGE,
         )
         return self._to_result(intent)
 
     async def retrieve_payment_intent(self, intent_id: str) -> PaymentIntentResult:
-        intent = await asyncio.to_thread(self._stripe.PaymentIntent.retrieve, intent_id)
+        intent = await asyncio.to_thread(
+            self._stripe.PaymentIntent.retrieve, intent_id, expand=_EXPAND_CHARGE
+        )
         return self._to_result(intent)
 
     async def capture_payment_intent(self, intent_id: str) -> PaymentIntentResult:
         """Preleva davvero l'importo già autorizzato."""
-        intent = await asyncio.to_thread(self._stripe.PaymentIntent.capture, intent_id)
+        intent = await asyncio.to_thread(
+            self._stripe.PaymentIntent.capture, intent_id, expand=_EXPAND_CHARGE
+        )
         return self._to_result(intent)
 
     async def cancel_payment_intent(self, intent_id: str) -> PaymentIntentResult:
         """
         Rilascia l'autorizzazione: la carta non verrà addebitata.
 
-        :raises PaymentIntentNotCancellable: se Stripe rifiuta perché l'importo
-            è già stato incassato. Non è un errore di sistema ma un esito: il
-            chiamante deve concludere che il pagamento è andato a buon fine e
-            comportarsi di conseguenza.
+        Se Stripe rifiuta (`InvalidRequestError`) **non si tira a indovinare**:
+        lo stesso errore copre «già incassato», «già annullato», un
+        identificativo inesistente e una richiesta malformata. Si rilegge
+        l'intent e si decide dal suo stato reale (debito #25.1):
+
+        - `succeeded` → `PaymentIntentNotCancellable`: l'ospite ha pagato;
+        - `canceled` → esito normale: l'autorizzazione era già rilasciata;
+        - altro, o rilettura impossibile → `PaymentGatewayError`: lo sweeper
+          non libera nulla e riprova al giro dopo.
+
+        Prima ogni rifiuto diventava «già incassato», cioè «l'ospite ha
+        pagato»: nel dubbio, la conclusione peggiore.
+
+        :raises PaymentIntentNotCancellable: l'importo è già stato incassato.
+            Non è un errore di sistema ma un esito: il chiamante deve
+            concludere che il pagamento è andato a buon fine.
+        :raises PaymentGatewayError: esito non determinabile.
         """
         try:
-            intent = await asyncio.to_thread(self._stripe.PaymentIntent.cancel, intent_id)
+            intent = await asyncio.to_thread(
+                self._stripe.PaymentIntent.cancel, intent_id, expand=_EXPAND_CHARGE
+            )
         except self._stripe.error.InvalidRequestError as error:
-            raise PaymentIntentNotCancellable(str(error)) from error
+            return await self._resolve_refused_cancel(intent_id, error)
         return self._to_result(intent)
+
+    async def _resolve_refused_cancel(self, intent_id: str, error: Exception) -> PaymentIntentResult:
+        """Decide l'esito di un annullamento rifiutato dallo stato reale dell'intent."""
+        try:
+            current = await self.retrieve_payment_intent(intent_id)
+        except Exception as retrieve_error:
+            raise PaymentGatewayError(
+                "Annullamento rifiutato e stato del pagamento non verificabile"
+            ) from retrieve_error
+
+        if current.is_captured:
+            raise PaymentIntentNotCancellable(str(error)) from error
+        if current.status == "canceled":
+            return current
+        raise PaymentGatewayError(
+            f"Annullamento rifiutato con il pagamento in stato '{current.status}'"
+        ) from error
 
     async def refund(self, intent_id: str, amount_cents: Optional[int] = None) -> str:
         """Rimborsa un pagamento già incassato. `None` rimborsa l'intero importo."""
@@ -216,7 +304,7 @@ class LiveStripeGateway:
             parametri["amount"] = amount_cents
 
         rimborso = await asyncio.to_thread(self._stripe.Refund.create, **parametri)
-        return rimborso["id"]
+        return _as_dict(rimborso)["id"]
 
     # ------------------------------------------------------------------ #
     # Webhook                                                             #
@@ -238,11 +326,14 @@ class LiveStripeGateway:
             raise PaymentGatewayError("stripe_webhook_secret non configurata")
 
         try:
-            return self._stripe.Webhook.construct_event(
+            return _as_dict(self._stripe.Webhook.construct_event(
                 payload,
                 signature,
                 settings.stripe_webhook_secret.get_secret_value(),
-            )
+                # Finestra anti-replay: senza, l'impostazione esisteva ma non
+                # contava nulla, e cambiarla non aveva effetto (debito #25.2).
+                tolerance=settings.stripe_webhook_tolerance_seconds,
+            ))
         except ValueError as error:
             raise InvalidWebhookSignature("Payload non valido") from error
         except self._stripe.error.SignatureVerificationError as error:
@@ -255,14 +346,8 @@ class LiveStripeGateway:
     @staticmethod
     def _to_result(intent) -> PaymentIntentResult:
         """Estrae dal Payment Intent solo i campi che il dominio usa."""
-        brand = None
-        last4 = None
-
-        charges = (intent.get("charges") or {}).get("data") or []
-        if charges:
-            dettagli = (charges[0].get("payment_method_details") or {}).get("card") or {}
-            brand = dettagli.get("brand")
-            last4 = dettagli.get("last4")
+        intent = _as_dict(intent)
+        brand, last4 = card_details_of(intent)
 
         return PaymentIntentResult(
             id=intent["id"],

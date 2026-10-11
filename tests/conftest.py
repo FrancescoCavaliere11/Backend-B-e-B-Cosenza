@@ -20,7 +20,7 @@ loop fra fixture di scope diverso, che cambiano da una versione di
 `pytest-asyncio` all'altra.
 """
 from decimal import Decimal
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import pytest
 import pytest_asyncio
@@ -44,6 +44,9 @@ import src.data.model.booking_payment_history  # noqa: F401
 import src.data.model.stripe_event  # noqa: F401
 
 from src.data.model.room import Room
+
+if TYPE_CHECKING:
+    from src.data.model.user import User
 
 TEST_DB_NAME = settings.db_test_name or f"{settings.db_name}_test"
 

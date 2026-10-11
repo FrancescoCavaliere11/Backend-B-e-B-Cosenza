@@ -15,7 +15,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.enumerators import BookingStatus, PaymentOption
-from src.data.model.booking import Booking
 from src.data.repository.booking_repository import BookingRepository
 from src.data.repository.booking_status_history_repository import BookingStatusHistoryRepository
 from src.data.schemas.booking_schema import GuestBookingCreateSchema

@@ -1,6 +1,5 @@
 from typing import List
 
-from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 from uuid import UUID
 

@@ -29,4 +29,5 @@ async def get_current_user(
             raise credentials_exception
         return user
     except Exception:
-        raise credentials_exception
+        # `from None`: la causa (token, query) non deve accompagnare il 401.
+        raise credentials_exception from None

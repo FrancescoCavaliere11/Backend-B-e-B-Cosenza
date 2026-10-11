@@ -1,5 +1,5 @@
 from uuid import UUID
-from pydantic import Field, EmailStr, field_validator
+from pydantic import ConfigDict, Field, EmailStr, field_validator
 
 from src.config.schemas_config import CustomModel
 from src.data.enumerators import UserRole
@@ -45,6 +45,5 @@ class CurrentUserSchema(CustomModel):
     firstname: str
     role: UserRole
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
