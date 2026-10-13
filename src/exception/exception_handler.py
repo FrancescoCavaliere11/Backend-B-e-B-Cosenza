@@ -102,6 +102,23 @@ def _build_error_message(first_error: Dict[str, Any]) -> str:
     return f"Errore sul campo '{campo}': {tipo_errore}"
 
 
+def _app_exception_content(exc: AppException) -> Dict[str, Any]:
+    """
+    Corpo della risposta di un'eccezione di business.
+
+    Se l'eccezione dichiara un `field`, il dettaglio segue lo stesso formato
+    degli errori di validazione (`loc`, `msg`, `type`): il client usa un solo
+    parser per entrambi.
+
+    :param exc: eccezione di business sollevata da un service o da una dipendenza.
+    :return: contenuto JSON della risposta.
+    """
+    content: Dict[str, Any] = {"message": exc.message}
+    if exc.field:
+        content["details"] = [{"loc": ["body", exc.field], "msg": exc.message, "type": "value_error"}]
+    return content
+
+
 def setup_exception_handler(app: FastAPI):
     # ------------------------------------------------------------------ #
     # Errori di validazione: due colpevoli diversi                        #
@@ -191,7 +208,7 @@ def setup_exception_handler(app: FastAPI):
     async def app_exception_handler(request: Request, exc: AppException):
         return JSONResponse(
             status_code=exc.status_code,
-            content={"message": exc.message},
+            content=_app_exception_content(exc),
         )
 
     # Handler più specifico per il rate limiting: Starlette risolve percorrendo

@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **10 ottobre 2026** · Copertura: Step A → G
+Versione API `v1` · Documento aggiornato al **13 ottobre 2026** · Copertura: Step A → G
 
 > I pagamenti online hanno un documento proprio: `payment_api.md`.
 
@@ -106,7 +106,7 @@ Il backend non espone mai stack trace. Ogni eccezione di dominio deriva da `AppE
 | `InvalidDateRange` | 422 | L'intervallo di date indicato non è valido |
 | `InvalidGuestCount` | 422 | Il numero di ospiti non è compatibile con le camere |
 | `InvalidQuoteToken` | 422 | Il preventivo non è più valido |
-| `CaptchaValidationFailed` | 422 | Verifica anti-bot non superata |
+| `CaptchaValidationFailed` | 422 | Verifica anti-bot non superata — con `details[].loc = ["body", "captcha_token"]` |
 | `ConcurrentModification` | 409 | La prenotazione è stata modificata da un altro operatore |
 | `InvalidPaymentOperation` | 409 | L'operazione non è compatibile con lo stato del pagamento |
 | `RateLimitExceeded` | 429 | Troppe richieste: riprova più tardi |
@@ -203,7 +203,9 @@ Verificato solo su `POST /api/v1/bookings/` (creazione pubblica). Scelto al post
 
 - Disattivato per impostazione predefinita (`CAPTCHA_ENABLED=false`): in sviluppo non serve configurare nulla.
 - Il frontend inserisce il widget Turnstile e invia il token risultante nel campo `captcha_token`.
-- Token assente o rifiutato → `422`.
+- Token assente o rifiutato → `422` con `details: [{"loc": ["body", "captcha_token"], "msg": "Verifica anti-bot non superata", "type": "value_error"}]`. Il campo serve a distinguerlo dal preventivo scaduto (`InvalidQuoteToken`), anch'esso `422` ma senza `details`: il client ripete la verifica invece di ricalcolare il preventivo.
+- **Il token vale una sola volta** (regola di Cloudflare). Dopo ogni invio non riuscito, qualunque sia l'errore, il client deve chiedere un token nuovo (`turnstile.reset`): la verifica avviene prima della logica di prenotazione, quindi il token è già stato speso.
+- **Configurazione**: `CAPTCHA_ENABLED=true` richiede `CAPTCHA_SECRET_KEY`, altrimenti il backend **non si avvia** (dal 13/10/2026; prima la verifica veniva saltata con un avviso nel log). Per lo sviluppo Cloudflare fornisce chiavi di prova: secret `1x0000000000000000000000000000000AA` (accetta sempre), `2x0000000000000000000000000000000AA` (rifiuta sempre); site key `1x00000000000000000000AA` (passa), `2x00000000000000000000AB` (fallisce), `3x00000000000000000000FF` (chiede l'interazione).
 
 **Comportamento in caso di disservizio**: se Cloudflare non risponde o va in timeout (5 secondi), la richiesta **viene lasciata passare** e l'evento registrato come warning. Bloccare tutte le prenotazioni durante un disservizio di terze parti costerebbe incassi reali; le poche richieste automatiche che passassero creerebbero prenotazioni non confermate, che scadono da sole in quindici minuti.
 
@@ -1515,6 +1517,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 13/10/2026 | **—** | **Captcha**: `CaptchaValidationFailed` indica il campo (`details[].loc = captcha_token`) — `AppException` ha ora un attributo `field` facoltativo che l'handler espone nello stesso formato degli errori di validazione · `CAPTCHA_ENABLED=true` senza `CAPTCHA_SECRET_KEY` blocca l'avvio · un `.env` non valido non stampa più i valori letti (chiavi comprese) nell'errore d'avvio (`hide_input_in_errors`) · nuovo `tests/test_captcha.py` (configurazione, verifica del token, fail-open, risposta HTTP) |
 | 10/10/2026 | **—** | **Telefono dell'ospite internazionale** (debito #32): `GuestDataSchema.phone_number` accetta numeri di qualunque Paese e li salva normalizzati in E.164 (`validate_international_phone`); senza prefisso si assume +39, quindi i numeri a 10 cifre restano validi. Migrazione dati `c4d8f2a61b3e`: i `guest_phone` già salvati a 10 cifre diventano `+39…`. **Per l'Italia solo cellulari** (`3` + 9 cifre). Il telefono degli utenti registrati non cambia; i numeri già salvati non vengono rivalidati. +19 test schema, +2 admin. `ruff` in `requirements-dev.txt` |
 | 10/10/2026 | **—** | Pulizia (debito #10–#13, #16–#18): `model_config = ConfigDict(...)` al posto di `class Config` negli schemi delle anagrafiche; costante `HTTP_422_UNPROCESSABLE_CONTENT` (codice invariato); import inutilizzati rimossi; configurazione `ruff.toml`. Nessun cambiamento di comportamento: pytest senza avvisi |
 | 09/10/2026 | **—** | **Nuovo `GET /admin/bookings/planning`** (endpoint 18): camere e soggiorni che le occupano in una finestra di al massimo 62 giorni (`planning_max_window_days`), passato compreso, senza email né telefono. Stessa regola di occupazione della disponibilità. Nuovo `BookingPlanningService` (sola lettura, composto da `build_planning_service`). +14 test |

@@ -19,11 +19,16 @@ class AppException(Exception):
 
     :cvar status_code: status HTTP con cui l'handler globale risponderà.
     :cvar default_message: messaggio usato quando il chiamante non ne fornisce uno.
+    :cvar field: campo della richiesta a cui l'errore si riferisce, se ce n'è
+        uno. L'handler lo espone in `details[].loc`, nello stesso formato degli
+        errori di validazione, così il client può distinguere due errori con lo
+        stesso status (es. captcha rifiutato e preventivo scaduto, entrambi `422`).
     :ivar message: messaggio effettivo, esposto al client.
     """
 
     status_code: int = 400
     default_message: str = "Si è verificato un errore durante l'elaborazione della richiesta."
+    field: Optional[str] = None
 
     def __init__(self, message: Optional[str] = None):
         self.message = message if message is not None else self.default_message
@@ -154,8 +159,10 @@ class InvalidQuoteToken(AppException):
 
 
 class CaptchaValidationFailed(AppException):
+    """Token Turnstile assente o rifiutato da Cloudflare."""
     status_code = 422
     default_message = "Verifica anti-bot non superata"
+    field = "captcha_token"
 
 
 class RateLimitExceeded(AppException):

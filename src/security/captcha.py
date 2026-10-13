@@ -45,13 +45,8 @@ async def verify_captcha(token: Optional[str], remote_ip: Optional[str] = None) 
     """
     if not settings.captcha_enabled:
         return
-
-    if not settings.captcha_secret_key:
-        logger.warning(
-            "captcha_enabled è attivo ma captcha_secret_key non è configurata: "
-            "verifica saltata"
-        )
-        return
+    # Con il captcha attivo la chiave segreta c'è sempre: `Settings` rifiuta
+    # di avviarsi senza (vedi `_check_captcha`).
 
     if not token:
         raise CaptchaValidationFailed("Verifica anti-bot mancante")

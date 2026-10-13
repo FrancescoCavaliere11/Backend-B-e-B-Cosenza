@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
@@ -226,7 +226,24 @@ class Settings(BaseSettings):
     #: difesa contro il riuso di una notifica catturata in passato.
     stripe_webhook_tolerance_seconds: int = 300
 
-    model_config = SettingsConfigDict(env_file=env_file_path, extra="ignore")
+    #: `hide_input_in_errors`: senza, un `.env` non valido fa stampare a
+    #: Pydantic **tutti i valori letti**, chiavi segrete comprese (in chiaro:
+    #: `SecretStr` le maschera solo dopo la validazione), nel traceback
+    #: d'avvio e quindi nei log del server.
+    model_config = SettingsConfigDict(env_file=env_file_path, extra="ignore", hide_input_in_errors=True)
+
+    @model_validator(mode="after")
+    def _check_captcha(self) -> "Settings":
+        """
+        Captcha attivo senza chiave segreta: il backend non parte.
+
+        Prima la verifica veniva saltata con un avviso nel log: in produzione
+        il captcha sembrava acceso ma non proteggeva nulla. Un errore di
+        configurazione si scopre all'avvio, non dopo i primi bot.
+        """
+        if self.captcha_enabled and not (self.captcha_secret_key and self.captcha_secret_key.get_secret_value().strip()):
+            raise ValueError("CAPTCHA_ENABLED=true richiede CAPTCHA_SECRET_KEY nel file .env")
+        return self
 
 
 settings = Settings()
