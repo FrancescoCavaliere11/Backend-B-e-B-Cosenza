@@ -151,6 +151,18 @@ def validate_room_name(value: str):
     return _validate_no_padding_space(value, "nome stanza")
 
 
+def validate_room_description(value: Optional[str]) -> Optional[str]:
+    """
+    Descrizione della camera: spazi e righe vuote ai bordi vengono tolti
+    (arriva da un'area di testo, dove un a capo finale è normale); una
+    descrizione vuota diventa `None`, così il sito non mostra paragrafi vuoti.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 # Room Service validators
 def validate_room_services_ids(value: List):
     if len(value) != len(set(value)):

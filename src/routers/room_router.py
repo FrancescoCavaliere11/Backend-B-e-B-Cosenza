@@ -10,6 +10,7 @@ from src.data.model.user import User
 from src.data.repository.room_repository import RoomRepository
 from src.data.repository.room_service_repository import RoomServiceRepository
 from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema, RoomUpdateSchema
+from src.routers.dependencies import build_request_model
 from src.service.room_service import RoomService
 from src.security.authorization import is_admin_user
 
@@ -43,7 +44,8 @@ async def create_room(
     current_user: Annotated[User,Depends(is_admin_user)]
 ) -> RoomSchema:
     room_data_json = json.loads(room_form)
-    payload = RoomCreateSchema(** room_data_json)
+    # Dati del client: un errore di validazione è un 422, non un 500 (vedi `build_request_model`).
+    payload = build_request_model(RoomCreateSchema, **room_data_json)
     return await service.create_room(payload=payload, image=image, current_user_id=current_user.id)
 
 
@@ -55,7 +57,7 @@ async def update_room(
     image: Annotated[Optional[UploadFile], File()] = None,
 ) -> RoomSchema:
     room_data_json = json.loads(room_form)
-    payload = RoomUpdateSchema(**room_data_json)
+    payload = build_request_model(RoomUpdateSchema, **room_data_json)
     return await service.update_room(payload=payload, image=image, current_user_id=current_user.id)
 
 

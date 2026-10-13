@@ -1,6 +1,6 @@
 from src.config.database_config import Base
 import uuid
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import Numeric, SmallInteger, Text, UUID, Boolean
 from decimal import Decimal
@@ -33,6 +33,10 @@ class Room(Base, Auditable):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     number: Mapped[int] = mapped_column(SmallInteger, nullable=False, unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true", default=True)
+
+    #: Testo libero mostrato sul sito (es. «un letto matrimoniale e due
+    #: lettini»). Facoltativo: una camera senza descrizione non mostra nulla.
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     img_url: Mapped[str] = mapped_column(Text, nullable=False, unique=False)  # todo mettere unique a true
 

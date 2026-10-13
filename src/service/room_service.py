@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 from uuid import UUID
 from fastapi import UploadFile
 from sqlalchemy.exc import IntegrityError
@@ -28,22 +28,25 @@ class RoomService:
 
     async def get_all(self) -> List[RoomSchema]:
         rooms = await self.room_repository.get_all()
-        room_schemas = []
-        for room in rooms:
-            room_data = {
-                "id": room.id,
-                "name": room.name,
-                "capacity": room.capacity,
-                "price": room.price,
-                "number": room.number,
-                "enabled": room.enabled,
-                "services": [RoomServiceSchema.model_validate(service) for service in room.services]
-            }
+        return [self._to_schema(room, room.services) for room in rooms]
 
-            room_schema = RoomSchema.model_validate(room_data)
-            room_schemas.append(room_schema)
-
-        return room_schemas
+    @staticmethod
+    def _to_schema(room: Room, services: Sequence[RoomServiceModel]) -> RoomSchema:
+        """
+        Vista di una camera. I servizi si passano a parte: dopo un `refresh`
+        la relazione non è caricata, e leggerla qui in un contesto async
+        scatenerebbe un lazy load non consentito.
+        """
+        return RoomSchema(
+            id=room.id,
+            name=room.name,
+            capacity=room.capacity,
+            price=room.price,
+            number=room.number,
+            enabled=room.enabled,
+            description=room.description,
+            services=[RoomServiceSchema.model_validate(service) for service in services],
+        )
 
 
     async def create_room(
@@ -84,7 +87,8 @@ class RoomService:
             price=payload.price,
             services=room_services,
             img_url=img_url,
-            enabled=payload.enabled
+            enabled=payload.enabled,
+            description=payload.description,
         )
 
         apply_audit_fields(audit=new_room, user_id=current_user_id, is_create=True)
@@ -93,18 +97,10 @@ class RoomService:
         await self.session.flush()
         await self.session.refresh(new_room)
 
-        room_data = {
-            "id": new_room.id,
-            "name": new_room.name,
-            "capacity": new_room.capacity,
-            "price": new_room.price,
-            "number": new_room.number,
-            "enabled": new_room.enabled,
-            "services": [RoomServiceSchema.model_validate(service) for service in room_services]
-        }
+        room_schema = self._to_schema(new_room, room_services)
 
         await self.session.commit()
-        return RoomSchema.model_validate(room_data)
+        return room_schema
 
     async def _validate_and_get_services(self, service_ids: List[UUID]) -> List[RoomServiceModel]:
         room_services = await self.room_service_repository.get_all_by_id(service_ids)
@@ -150,6 +146,7 @@ class RoomService:
         room.price = payload.price
         room.services = room_services
         room.enabled = payload.enabled
+        room.description = payload.description
 
         if image is not None:
             await validate_image(image)
@@ -160,18 +157,10 @@ class RoomService:
         await self.session.flush()
         await self.session.refresh(room)
 
-        room_data = {
-            "id": room.id,
-            "name": room.name,
-            "capacity": room.capacity,
-            "price": room.price,
-            "number": room.number,
-            "enabled": room.enabled,
-            "services": [RoomServiceSchema.model_validate(service) for service in room_services]
-        }
+        room_schema = self._to_schema(room, room_services)
 
         await self.session.commit()
-        return RoomSchema.model_validate(room_data)
+        return room_schema
 
     async def delete_room(self, room_id: UUID) -> None:
         # todo: quando elimino, va eliminata anche l'immagine relativa alla stanza dallo store che userò
