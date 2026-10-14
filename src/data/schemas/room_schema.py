@@ -70,3 +70,23 @@ class RoomSchema(CustomModel):
     services: List[RoomServiceSchema]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class RoomPublicSchema(CustomModel):
+    """
+    Camera come la vede il sito pubblico (lacuna B1): solo i dati da vetrina.
+
+    Niente `enabled`: le camere disattivate non arrivano proprio al sito.
+    Restano `id`, che serve a preventivo e calendario, e `number`, con cui il
+    sito abbina le foto.
+    """
+
+    id: UUID
+    number: int
+    name: str
+    capacity: int
+    price: Decimal
+    description: Optional[str] = None
+    services: List[RoomServiceSchema]
+
+    model_config = ConfigDict(from_attributes=True)

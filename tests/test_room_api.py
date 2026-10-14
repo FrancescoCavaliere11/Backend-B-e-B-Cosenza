@@ -10,6 +10,7 @@ import json
 from datetime import date, timedelta
 
 ROOMS = "/api/v1/room/"
+PUBLIC_ROOMS = "/api/v1/room/enabled"
 BOOKINGS = "/api/v1/admin/bookings/"
 
 CHECK_IN = date.today() + timedelta(days=40)
@@ -151,8 +152,52 @@ async def test_descrizione_troppo_lunga_e_un_422(admin_client, rooms):
 
 
 async def test_la_descrizione_e_pubblica(admin_client, rooms):
-    """Il sito la legge da `GET /room/` senza autenticazione."""
+    """Il sito la legge da `GET /room/enabled` senza autenticazione."""
     await _update(admin_client, rooms[0], description=DESCRIPTION)
 
     admin_client.cookies.clear()  # da qui in poi è un visitatore anonimo
-    assert await _description_of(admin_client, rooms[0]) == DESCRIPTION
+    response = await admin_client.get(PUBLIC_ROOMS)
+    assert response.status_code == 200, response.text
+    assert next(item for item in response.json() if item["id"] == str(rooms[0].id))["description"] == DESCRIPTION
+
+
+# ===========================================================================
+# Elenco pubblico e elenco del back-office (lacuna B1)
+# ===========================================================================
+
+async def test_l_elenco_pubblico_mostra_solo_le_camere_in_vendita(admin_client, rooms):
+    """Una camera disattivata non deve arrivare al sito, nemmeno nascosta dal browser."""
+    await _disable(admin_client, rooms[0])
+    admin_client.cookies.clear()
+
+    response = await admin_client.get(PUBLIC_ROOMS)
+
+    assert response.status_code == 200, response.text
+    ids = [item["id"] for item in response.json()]
+    assert str(rooms[0].id) not in ids
+    assert str(rooms[1].id) in ids
+
+
+async def test_l_elenco_pubblico_e_ordinato_e_senza_campi_del_back_office(api_client, rooms):
+    response = await api_client.get(PUBLIC_ROOMS)
+
+    items = response.json()
+    assert [item["number"] for item in items] == sorted(item["number"] for item in items)
+    assert set(items[0]) == {"id", "number", "name", "capacity", "price", "description", "services"}
+
+
+async def test_l_elenco_completo_e_riservato_all_admin(user_client, rooms):
+    assert (await user_client.get(ROOMS)).status_code == 403
+
+    user_client.cookies.clear()  # da qui in poi è un visitatore anonimo
+    assert (await user_client.get(ROOMS)).status_code == 401
+
+
+async def test_l_admin_vede_anche_le_camere_disattivate(admin_client, rooms):
+    await _disable(admin_client, rooms[0])
+
+    response = await admin_client.get(ROOMS)
+
+    assert response.status_code == 200, response.text
+    item = next(item for item in response.json() if item["id"] == str(rooms[0].id))
+    assert item["enabled"] is False

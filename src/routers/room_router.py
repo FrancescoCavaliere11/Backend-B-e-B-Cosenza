@@ -9,10 +9,11 @@ from src.config.database_config import get_async_session
 from src.data.model.user import User
 from src.data.repository.room_repository import RoomRepository
 from src.data.repository.room_service_repository import RoomServiceRepository
-from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema, RoomUpdateSchema
+from src.data.schemas.room_schema import RoomCreateSchema, RoomPublicSchema, RoomSchema, RoomUpdateSchema
 from src.routers.dependencies import build_request_model
 from src.service.room_service import RoomService
 from src.security.authorization import is_admin_user
+from src.security.rate_limiter import public_rooms_rate_limit
 
 
 room_router = APIRouter(prefix="/api/v1/room", tags=["Room"])
@@ -27,12 +28,34 @@ async def get_room_service(db: AsyncSession = Depends(get_async_session)):
         session=db
     )
 
-# todo vedere se proteggere l'endpoint e farne uno a parte per i customer con meno dati
-@room_router.get("/", response_model=List[RoomSchema])
+@room_router.get("/", response_model=List[RoomSchema], dependencies=[Depends(is_admin_user)])
 async def get_all(
         room_service: Annotated[RoomService, Depends(get_room_service)],
 ) -> List[RoomSchema]:
+    """
+    Tutte le camere, **disattivate comprese**, con i campi del back-office.
+
+    Solo per l'admin: il sito pubblico usa `GET /api/v1/room/enabled`, che
+    restituisce le sole camere in vendita (lacuna B1).
+    """
     return await room_service.get_all()
+
+
+@room_router.get(
+    "/enabled",
+    response_model=List[RoomPublicSchema],
+    dependencies=[Depends(public_rooms_rate_limit)],
+)
+async def get_enabled(
+        room_service: Annotated[RoomService, Depends(get_room_service)],
+) -> List[RoomPublicSchema]:
+    """
+    Camere in vendita, per il sito pubblico (lacuna B1): solo le abilitate,
+    ordinate per numero, con i dati da vetrina. Pubblico, senza login.
+
+    Il filtro sulle disattivate sta qui e non nel browser.
+    """
+    return await room_service.get_public_rooms()
 
 
 

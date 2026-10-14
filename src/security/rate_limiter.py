@@ -220,6 +220,10 @@ quote_rate_limit = RateLimit(
     "quote", settings.rate_limit_availability_per_ip_minute, 60
 )
 
+public_rooms_rate_limit = RateLimit(
+    "public_rooms", settings.rate_limit_availability_per_ip_minute, 60
+)
+
 occupancy_rate_limit = RateLimit(
     "occupancy", settings.rate_limit_availability_per_ip_minute, 60
 )

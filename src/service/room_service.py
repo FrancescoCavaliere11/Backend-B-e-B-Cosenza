@@ -8,7 +8,7 @@ from src.data.model.room import Room
 from src.data.model.room_service import RoomService as RoomServiceModel
 from src.data.repository.room_repository import RoomRepository
 from src.data.repository.room_service_repository import RoomServiceRepository
-from src.data.schemas.room_schema import RoomCreateSchema, RoomSchema, RoomUpdateSchema
+from src.data.schemas.room_schema import RoomCreateSchema, RoomPublicSchema, RoomSchema, RoomUpdateSchema
 from src.data.schemas.room_service_schema import RoomServiceSchema
 from src.exception.custom_exception import EntityAlreadyExists, EntityInUse, InvalidRoomService, EntityNotFound
 from src.security.audit_logging import apply_audit_fields
@@ -27,8 +27,14 @@ class RoomService:
 
 
     async def get_all(self) -> List[RoomSchema]:
+        """Tutte le camere, disattivate comprese: vista del back-office."""
         rooms = await self.room_repository.get_all()
         return [self._to_schema(room, room.services) for room in rooms]
+
+    async def get_public_rooms(self) -> List[RoomPublicSchema]:
+        """Camere in vendita, ordinate per numero, con i soli dati da vetrina (lacuna B1)."""
+        rooms = await self.room_repository.get_all_enabled()
+        return [RoomPublicSchema.model_validate(room) for room in rooms]
 
     @staticmethod
     def _to_schema(room: Room, services: Sequence[RoomServiceModel]) -> RoomSchema:
