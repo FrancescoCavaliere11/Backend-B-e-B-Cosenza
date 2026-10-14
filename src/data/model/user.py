@@ -1,9 +1,10 @@
 from src.config.database_config import Base
 import uuid
-from typing import TYPE_CHECKING, List
+from datetime import datetime
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.data.enumerators import UserRole
-from sqlalchemy import Enum as SQLEnum, Text, UUID
+from sqlalchemy import DateTime, Enum as SQLEnum, Text, UUID
 
 from src.security.audit_logging import Auditable
 
@@ -28,6 +29,14 @@ class User(Base, Auditable):
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     password: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), nullable=False)
+
+    #: Revoca globale delle sessioni (debito #30): ogni token emesso **prima**
+    #: di questo istante è rifiutato, senza doverli elencare uno per uno. Si
+    #: imposta quando un refresh token già usato viene ripresentato, cioè
+    #: quando qualcuno lo ha copiato. `None`: nessuna revoca.
+    tokens_valid_after: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # MODIFICA (Booking Module - Step A):
     # Rimosso `cascade="all, delete-orphan"`. La cancellazione di un utente NON

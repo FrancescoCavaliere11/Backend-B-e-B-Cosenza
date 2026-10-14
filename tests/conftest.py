@@ -42,6 +42,7 @@ import src.data.model.booking_token  # noqa: F401
 import src.data.model.booking_status_history  # noqa: F401
 import src.data.model.booking_payment_history  # noqa: F401
 import src.data.model.stripe_event  # noqa: F401
+import src.data.model.revoked_token  # noqa: F401
 
 from src.data.model.room import Room
 

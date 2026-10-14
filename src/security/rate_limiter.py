@@ -263,6 +263,12 @@ login_rate_limit = RateLimit(
     "login", settings.rate_limit_login_per_ip, settings.rate_limit_login_window_seconds
 )
 
+#: Il rinnovo della sessione ha lo stesso tetto per IP del login: un sito sano
+#: rinnova una volta ogni 15 minuti.
+refresh_rate_limit = RateLimit(
+    "auth_refresh", settings.rate_limit_login_per_ip, settings.rate_limit_login_window_seconds
+)
+
 
 def _login_failure_keys(email: str, ip: str) -> Tuple[Tuple[str, int], Tuple[str, int]]:
     """Chiavi e limiti dei due contatori di fallimenti: `(account, IP)` e `account`."""

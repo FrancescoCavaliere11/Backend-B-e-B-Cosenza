@@ -173,6 +173,18 @@ class InvalidCredentials(AppException):
     headers = {"WWW-Authenticate": "Bearer"}
 
 
+class InvalidSession(AppException):
+    """
+    Token di sessione assente, scaduto, manomesso o revocato (logout, rotazione).
+
+    Un solo messaggio per tutti i casi: al client serve sapere che deve
+    rifare il login, non perché.
+    """
+    status_code = 401
+    default_message = "Sessione scaduta o non valida"
+    headers = {"WWW-Authenticate": "Bearer"}
+
+
 class CaptchaValidationFailed(AppException):
     """Token Turnstile assente o rifiutato da Cloudflare."""
     status_code = 422

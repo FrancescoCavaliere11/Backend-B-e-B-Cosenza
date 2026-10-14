@@ -46,6 +46,7 @@ from src.exception.custom_exception import (
     PaymentGatewayError,
     PaymentIntentNotCancellable,
 )
+from src.service.auth_service import build_auth_service
 from src.service.booking_service import BookingService, ExpiredBookingNotice
 from src.service.booking_service import build_booking_service as _compose_booking_service
 from src.service.email.email_service import EmailService, get_email_service
@@ -195,14 +196,21 @@ class BookingExpirationService:
             async with self._session_factory() as session:
                 service = build_booking_service(session)
                 eliminati = await service.purge_expired_tokens()
+            # Stessa cadenza per la lista di revoca delle sessioni (debito #30):
+            # una riga revocata serve solo fino alla scadenza del token.
+            async with self._session_factory() as session:
+                revoche = await build_auth_service(session).purge_expired_revocations()
         except Exception:
             logger.exception("Pulizia dei token fallita; riprovo al prossimo turno")
             return 0
 
-        if eliminati:
-            logger.info("Pulizia token: %d righe scadute eliminate", eliminati)
+        if eliminati or revoche:
+            logger.info(
+                "Pulizia token: %d token di prenotazione e %d revoche di sessione eliminati",
+                eliminati, revoche,
+            )
 
-        return eliminati
+        return eliminati + revoche
 
     # ------------------------------------------------------------------ #
     # Autorizzazioni                                                      #

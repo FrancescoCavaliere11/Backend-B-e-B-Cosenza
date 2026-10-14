@@ -33,6 +33,7 @@ from src.data.model.booking_token import BookingToken  # noqa: F401
 from src.data.model.booking_status_history import BookingStatusHistory  # noqa: F401
 from src.data.model.booking_payment_history import BookingPaymentHistory  # noqa: F401
 from src.data.model.stripe_event import StripeEvent  # noqa: F401
+from src.data.model.revoked_token import RevokedToken  # noqa: F401
 
 
 # Prima di qualunque cosa: senza questa chiamata i logger del progetto non

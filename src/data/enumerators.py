@@ -14,6 +14,14 @@ class TokenType(str, Enum):
     REFRESH = "refresh"
 
 
+class TokenRevocationReason(str, Enum):
+    """Perché un token di sessione è finito nella lista di revoca (debito #30)."""
+    #: L'utente è uscito.
+    LOGOUT = "LOGOUT"
+    #: Sostituito da un refresh: ogni refresh token vale una volta sola.
+    ROTATION = "ROTATION"
+
+
 class BookingStatus(str, Enum):
     """
     Stati della macchina a stati di una prenotazione.
