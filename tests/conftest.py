@@ -288,6 +288,12 @@ async def stripe_gateway(api_client, session_factory):
 TEST_PASSWORD = "Password1!"
 
 
+@pytest.fixture
+def user_password() -> str:
+    """Password degli utenti di prova, per i test che fanno login da sé."""
+    return TEST_PASSWORD
+
+
 async def _create_user(session, email: str, phone: str, role) -> "User":
     from src.data.model.user import User
     from src.security.password_handler import get_password_hash

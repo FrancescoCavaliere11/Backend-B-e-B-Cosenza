@@ -175,6 +175,18 @@ class Settings(BaseSettings):
     rate_limit_availability_per_ip_minute: int = 20
     rate_limit_confirm_per_ip_hour: int = 10
 
+    # --- Login: anti forza bruta (debito #19) ---------------------------------
+    #: Finestra comune dei tre limiti del login, in secondi.
+    rate_limit_login_window_seconds: int = 900
+    #: Tentativi di login, riusciti o no, dallo stesso IP. Protegge anche la
+    #: CPU: ogni verifica di password è volutamente lenta.
+    rate_limit_login_per_ip: int = 20
+    #: Fallimenti sullo stesso account dallo stesso IP. Il più stretto: ferma
+    #: chi indovina da un computer senza toccare l'utente vero, che entra dal suo.
+    rate_limit_login_failures_per_account_ip: int = 5
+    #: Fallimenti sullo stesso account da qualunque IP (*credential stuffing*).
+    rate_limit_login_failures_per_account: int = 10
+
     #: Numero di reverse proxy di cui fidarsi davanti all'applicazione.
     #:
     #: `0` (default) ignora `X-Forwarded-For` e usa l'IP del socket: corretto in

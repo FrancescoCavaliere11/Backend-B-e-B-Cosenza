@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **13 ottobre 2026** · Copertura: Step A → G
+Versione API `v1` · Documento aggiornato al **14 ottobre 2026** · Copertura: Step A → G
 
 > I pagamenti online hanno un documento proprio: `payment_api.md`.
 
@@ -178,10 +178,15 @@ Finestra scorrevole: per ogni chiave si conservano gli istanti delle richieste r
 | `POST /` (creazione) | 3 | 24 ore | email |
 | `POST /confirm`, `/cancel` | 10 | 1 ora | IP |
 | `POST /lookup` | 10 | 1 ora | IP |
+| `POST /api/v1/auth/token` (login) | 20 tentativi | 15 minuti | IP |
+| `POST /api/v1/auth/token` (login) | 5 **fallimenti** | 15 minuti | account + IP |
+| `POST /api/v1/auth/token` (login) | 10 **fallimenti** | 15 minuti | account |
 
 I limiti per IP ed email sono complementari: un attaccante con molti indirizzi IP resta vincolato sul numero di prenotazioni riconducibili alla stessa email, e viceversa.
 
 **Risposta al superamento**: `429` con header `Retry-After` in secondi.
+
+**Login** *(dal 14/10/2026, debito #19)*. I due limiti per account contano solo i **fallimenti** e vengono verificati **prima** della password: un tentativo bloccato non costa CPU e il blocco vale anche per la password giusta. Un login riuscito azzera il contatore account + IP, non quello per account (i fallimenti da altri IP potrebbero essere un attacco in corso). Chi sbaglia da un computer blocca solo sé stesso; per chiudere fuori l'utente vero servono 10 fallimenti da IP diversi, e il blocco dura al massimo 15 minuti. Le chiavi si calcolano dall'email inviata (minuscole, senza spazi), che l'account esista o no: risposte e messaggi sono identici, quindi il limite non rivela quali email sono registrate. Credenziali errate → `401` `{"message": "Email o password errati"}` con `WWW-Authenticate: Bearer` (`InvalidCredentials`). Nei log: `Login fallito`/`Login bloccato` con email mascherata e IP, `Login riuscito` con l'id dell'utente; mai la password né l'email completa. Soglie in `.env`: `RATE_LIMIT_LOGIN_PER_IP`, `RATE_LIMIT_LOGIN_FAILURES_PER_ACCOUNT_IP`, `RATE_LIMIT_LOGIN_FAILURES_PER_ACCOUNT`, `RATE_LIMIT_LOGIN_WINDOW_SECONDS`.
 
 ```
 HTTP/1.1 429 Too Many Requests
@@ -1535,6 +1540,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 14/10/2026 | **—** | **Login protetto dai tentativi ripetuti** (debito #19): limite per IP, per account + IP e per account sui fallimenti; `InvalidCredentials` (401) al posto di `HTTPException` nel service; `AppException` può portare intestazioni; log dei tentativi con email mascherata; mascheratura spostata in `src/security/masking.py`. Nuovo `tests/test_auth_rate_limit.py` |
 | 13/10/2026 | **—** | **Email**: certificato SMTP verificato (prima `starttls()` senza contesto lo accettava qualunque) · supporto porta 465 (`SMTP_USE_SSL`) · intestazioni `Date`, `Message-ID`, `Reply-To` · `EMAIL_REPLY_TO` ed `EMAIL_CONTACT_PHONE` nel piè di pagina al posto del solo «non rispondere» · nome della struttura e colore del marchio dalla configurazione · `EMAIL_ENABLED=true` senza `SMTP_HOST` blocca l'avvio · nuovo `tests/test_email_delivery.py` |
 | 13/10/2026 | **—** | **Captcha**: `CaptchaValidationFailed` indica il campo (`details[].loc = captcha_token`) — `AppException` ha ora un attributo `field` facoltativo che l'handler espone nello stesso formato degli errori di validazione · `CAPTCHA_ENABLED=true` senza `CAPTCHA_SECRET_KEY` blocca l'avvio · un `.env` non valido non stampa più i valori letti (chiavi comprese) nell'errore d'avvio (`hide_input_in_errors`) · nuovo `tests/test_captcha.py` (configurazione, verifica del token, fail-open, risposta HTTP) |
 | 10/10/2026 | **—** | **Telefono dell'ospite internazionale** (debito #32): `GuestDataSchema.phone_number` accetta numeri di qualunque Paese e li salva normalizzati in E.164 (`validate_international_phone`); senza prefisso si assume +39, quindi i numeri a 10 cifre restano validi. Migrazione dati `c4d8f2a61b3e`: i `guest_phone` già salvati a 10 cifre diventano `+39…`. **Per l'Italia solo cellulari** (`3` + 9 cifre). Il telefono degli utenti registrati non cambia; i numeri già salvati non vengono rivalidati. +19 test schema, +2 admin. `ruff` in `requirements-dev.txt` |

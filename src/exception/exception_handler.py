@@ -209,6 +209,7 @@ def setup_exception_handler(app: FastAPI):
         return JSONResponse(
             status_code=exc.status_code,
             content=_app_exception_content(exc),
+            headers=exc.headers,
         )
 
     # Handler più specifico per il rate limiting: Starlette risolve percorrendo

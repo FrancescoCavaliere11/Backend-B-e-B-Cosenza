@@ -14,6 +14,7 @@ il conteggio è esatto. Il giorno in cui servirà scalare orizzontalmente, baste
 implementare `RateLimitBackend` su Redis o PostgreSQL: i router non cambiano.
 """
 import asyncio
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
@@ -23,6 +24,9 @@ from fastapi import Request
 
 from src.config.config import settings
 from src.exception.custom_exception import RateLimitExceeded
+from src.security.masking import mask_email
+
+logger = logging.getLogger(__name__)
 
 #: Oltre questo numero di chiavi attive si ripulisce quelle ormai vuote, per
 #: evitare che la mappa cresca indefinitamente sotto attacco distribuito.
@@ -41,6 +45,18 @@ class RateLimitBackend(ABC):
             significativo solo quando la richiesta è rifiutata.
         """
 
+    @abstractmethod
+    async def check(self, key: str, limit: int, window_seconds: int) -> Tuple[bool, int]:
+        """Come `hit`, ma **senza registrare** nulla: dice solo se il limite è già pieno."""
+
+    @abstractmethod
+    async def record(self, key: str, window_seconds: int) -> None:
+        """Registra un evento senza verificare il limite (es. un login fallito)."""
+
+    @abstractmethod
+    async def clear(self, key: str) -> None:
+        """Dimentica gli eventi di una chiave (es. dopo un login riuscito)."""
+
 
 class InMemoryRateLimitBackend(RateLimitBackend):
     """Finestra scorrevole tenuta in memoria, protetta da lock asincrono."""
@@ -51,25 +67,47 @@ class InMemoryRateLimitBackend(RateLimitBackend):
 
     async def hit(self, key: str, limit: int, window_seconds: int) -> Tuple[bool, int]:
         async with self._lock:
-            # time.monotonic() e non time.time(): non risente di modifiche
-            # all'orologio di sistema né del cambio dell'ora legale.
-            now = time.monotonic()
-            cutoff = now - window_seconds
+            now, bucket = self._current(key, window_seconds)
+            verdict = self._verdict(bucket, limit, window_seconds, now)
+            if verdict[0]:
+                self._append(key, bucket, now, window_seconds)
+            return verdict
 
-            bucket = self._hits[key]
-            while bucket and bucket[0] <= cutoff:
-                bucket.popleft()
+    async def check(self, key: str, limit: int, window_seconds: int) -> Tuple[bool, int]:
+        async with self._lock:
+            now, bucket = self._current(key, window_seconds)
+            return self._verdict(bucket, limit, window_seconds, now)
 
-            if len(bucket) >= limit:
-                retry_after = int(bucket[0] + window_seconds - now) + 1
-                return False, max(retry_after, 1)
+    async def record(self, key: str, window_seconds: int) -> None:
+        async with self._lock:
+            now, bucket = self._current(key, window_seconds)
+            self._append(key, bucket, now, window_seconds)
 
-            bucket.append(now)
+    async def clear(self, key: str) -> None:
+        async with self._lock:
+            self._hits.pop(key, None)
 
-            if len(self._hits) > _PRUNE_THRESHOLD:
-                self._prune(cutoff)
+    def _current(self, key: str, window_seconds: int) -> Tuple[float, Deque[float]]:
+        """Istante attuale e richieste della chiave ancora dentro la finestra."""
+        # time.monotonic() e non time.time(): non risente di modifiche
+        # all'orologio di sistema né del cambio dell'ora legale.
+        now = time.monotonic()
+        bucket = self._hits[key]
+        while bucket and bucket[0] <= now - window_seconds:
+            bucket.popleft()
+        return now, bucket
 
-            return True, 0
+    @staticmethod
+    def _verdict(bucket: Deque[float], limit: int, window_seconds: int, now: float) -> Tuple[bool, int]:
+        if len(bucket) >= limit:
+            retry_after = int(bucket[0] + window_seconds - now) + 1
+            return False, max(retry_after, 1)
+        return True, 0
+
+    def _append(self, key: str, bucket: Deque[float], now: float, window_seconds: int) -> None:
+        bucket.append(now)
+        if len(self._hits) > _PRUNE_THRESHOLD:
+            self._prune(now - window_seconds)
 
     def _prune(self, cutoff: float) -> None:
         """Elimina le chiavi senza richieste recenti."""
@@ -197,3 +235,82 @@ booking_confirm_rate_limit = RateLimit(
 booking_lookup_rate_limit = RateLimit(
     "booking_lookup", settings.rate_limit_confirm_per_ip_hour, 3_600
 )
+
+
+# --- Login (debito #19) ---------------------------------------------------- #
+#
+# Tre limiti, con ruoli diversi:
+#
+# - **per IP**, su tutti i tentativi: una dipendenza, come gli altri endpoint;
+# - **per account + IP**, sui soli fallimenti: il più stretto. Ferma chi prova
+#   le password da un computer, senza toccare l'utente vero, che entra dal suo;
+# - **per account**, sui soli fallimenti da qualunque IP: ferma chi distribuisce
+#   i tentativi su molti indirizzi (*credential stuffing*).
+#
+# Si contano solo i fallimenti perché un limite sull'account che contasse anche
+# i successi bloccherebbe chi la password ce l'ha. Il blocco dura al massimo la
+# finestra (15 minuti): nessun blocco permanente, che permetterebbe a chiunque
+# di chiudere fuori un utente sbagliando apposta la sua password.
+#
+# Le chiavi si calcolano dall'email **inviata**, che l'account esista o no: la
+# risposta a un blocco è identica nei due casi, e il limite non diventa un modo
+# per scoprire quali email sono registrate.
+
+#: Messaggio del blocco, uguale per account esistenti e inesistenti.
+LOGIN_BLOCKED_MESSAGE = "Troppi tentativi di accesso: riprova più tardi"
+
+login_rate_limit = RateLimit(
+    "login", settings.rate_limit_login_per_ip, settings.rate_limit_login_window_seconds
+)
+
+
+def _login_failure_keys(email: str, ip: str) -> Tuple[Tuple[str, int], Tuple[str, int]]:
+    """Chiavi e limiti dei due contatori di fallimenti: `(account, IP)` e `account`."""
+    account = email.strip().lower()
+    return (
+        (f"login_fail_account_ip:{account}|{ip}", settings.rate_limit_login_failures_per_account_ip),
+        (f"login_fail_account:{account}", settings.rate_limit_login_failures_per_account),
+    )
+
+
+async def enforce_login_attempt_limits(email: str, ip: str) -> None:
+    """
+    Rifiuta il tentativo se l'account ha già troppi fallimenti recenti.
+
+    Si chiama **prima** di verificare la password: un tentativo bloccato non
+    consuma la CPU dell'hashing, e un blocco vale anche per la password giusta.
+
+    :raises RateLimitExceeded: con i secondi di attesa del limite più lontano.
+    """
+    if not settings.rate_limit_enabled:
+        return
+
+    window = settings.rate_limit_login_window_seconds
+    waits = []
+    for key, limit in _login_failure_keys(email, ip):
+        allowed, retry_after = await _backend.check(key, limit, window)
+        if not allowed:
+            waits.append(retry_after)
+
+    if waits:
+        logger.warning("Login bloccato: utente=%s ip=%s attesa=%ss", mask_email(email), ip, max(waits))
+        raise RateLimitExceeded(LOGIN_BLOCKED_MESSAGE, retry_after=max(waits))
+
+
+async def record_login_failure(email: str, ip: str) -> None:
+    """Conta un login fallito su entrambi i contatori dell'account."""
+    if not settings.rate_limit_enabled:
+        return
+    for key, _ in _login_failure_keys(email, ip):
+        await _backend.record(key, settings.rate_limit_login_window_seconds)
+
+
+async def clear_login_failures(email: str, ip: str) -> None:
+    """
+    Dopo un login riuscito azzera il contatore `(account, IP)`.
+
+    Quello per solo account resta: i fallimenti arrivati da *altri* IP non sono
+    dell'utente che è appena entrato, e potrebbero essere un attacco in corso.
+    """
+    pair_key, _ = _login_failure_keys(email, ip)[0]
+    await _backend.clear(pair_key)

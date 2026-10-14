@@ -10,7 +10,7 @@ Nota di design: questo modulo non importa nulla da FastAPI o Starlette. Gli
 status code sono interi semplici, così il layer di dominio resta indipendente
 dal framework web e le eccezioni restano riusabili (test, job, CLI).
 """
-from typing import Optional
+from typing import Dict, Optional
 
 
 class AppException(Exception):
@@ -23,12 +23,15 @@ class AppException(Exception):
         uno. L'handler lo espone in `details[].loc`, nello stesso formato degli
         errori di validazione, così il client può distinguere due errori con lo
         stesso status (es. captcha rifiutato e preventivo scaduto, entrambi `422`).
+    :cvar headers: intestazioni HTTP da aggiungere alla risposta, se servono
+        (es. `WWW-Authenticate` su un 401).
     :ivar message: messaggio effettivo, esposto al client.
     """
 
     status_code: int = 400
     default_message: str = "Si è verificato un errore durante l'elaborazione della richiesta."
     field: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
 
     def __init__(self, message: Optional[str] = None):
         self.message = message if message is not None else self.default_message
@@ -156,6 +159,18 @@ class InvalidQuoteToken(AppException):
     """
     status_code = 422
     default_message = "Il preventivo non è più valido: ripeti la ricerca delle disponibilità"
+
+
+class InvalidCredentials(AppException):
+    """
+    Email o password errati.
+
+    Un solo messaggio per i due casi: dire *quale* dei due è sbagliato
+    rivelerebbe quali email sono registrate.
+    """
+    status_code = 401
+    default_message = "Email o password errati"
+    headers = {"WWW-Authenticate": "Bearer"}
 
 
 class CaptchaValidationFailed(AppException):

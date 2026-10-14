@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover
     from typing_extensions import Protocol  # type: ignore
 
 from src.config.config import settings
+from src.security.masking import mask_email
 
 logger = logging.getLogger(__name__)
 
@@ -53,18 +54,8 @@ class EmailMessage:
     text_body: str
 
 
-def mask_recipient(address: str) -> str:
-    """
-    Riduce un indirizzo a una forma registrabile nei log.
-
-    `mario.rossi@gmail.com` diventa `m***@gmail.com`: abbastanza per
-    correlare un invio a una prenotazione durante una diagnosi, non abbastanza
-    per ricostruire una rubrica leggendo i log.
-    """
-    local, separator, domain = address.partition("@")
-    if not separator:
-        return "***"
-    return f"{local[:1]}***@{domain}"
+#: Mascheratura dell'indirizzo per i log: `mario.rossi@gmail.com` → `m***@gmail.com`.
+mask_recipient = mask_email
 
 
 class EmailBackend(Protocol):
