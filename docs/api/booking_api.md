@@ -310,6 +310,24 @@ Cinque messaggi, ciascuno in versione HTML e testo semplice.
 
 **Un quinto template**, `booking_slot_lost`, è arrivato con lo Step G: le camere vendute ad altri durante il pagamento. Merita un messaggio suo perché deve dire con chiarezza che **non c'è stato alcun addebito** — l'annullamento generico, che per il pagamento online parla di "importo già pagato", spaventerebbe l'ospite per un prelievo mai avvenuto.
 
+**Configurazione e consegna** *(dal 13/10/2026)*:
+
+| Variabile | Default | Note |
+|:--|:--|:--|
+| `EMAIL_ENABLED` | `false` | Con `true` serve `SMTP_HOST`, altrimenti il backend **non si avvia** |
+| `SMTP_HOST`, `SMTP_PORT` | —, `587` | |
+| `SMTP_USE_TLS` | `true` | Porta 587: connessione promossa con STARTTLS |
+| `SMTP_USE_SSL` | `false` | Porta 465: cifrata dal primo byte. **Ha la precedenza** su `SMTP_USE_TLS` |
+| `SMTP_USER`, `SMTP_PASSWORD` | — | Login solo se ci sono entrambi |
+| `EMAIL_FROM`, `EMAIL_FROM_NAME` | `noreply@bbcosenza.it`, `B&B Cosenza` | Il nome è anche quello della struttura nell'intestazione e nella firma |
+| `EMAIL_REPLY_TO` | — | Casella che riceve le risposte (`Reply-To`). Se presente, il piè di pagina invita a rispondere |
+| `EMAIL_CONTACT_PHONE` | — | Telefono nel piè di pagina, cliccabile nell'HTML |
+
+- **Il certificato del server SMTP è sempre verificato** (`ssl.create_default_context()`): `starttls()` senza contesto in Python non lo controlla, e chi si mettesse in mezzo leggerebbe la password SMTP. Se la verifica fallisce la connessione si chiude, senza mai ripiegare sul chiaro.
+- Ogni messaggio porta `Date` e un `Message-ID` sul dominio del mittente: `smtplib` non li aggiunge e la loro assenza porta allo spam o al rifiuto.
+- Piè di pagina: «rispondi a questa email» se c'è `EMAIL_REPLY_TO`, «chiamaci al …» se c'è `EMAIL_CONTACT_PHONE`, altrimenti «messaggio automatico, non rispondere». Colore del marchio `#2F3A2E`, lo stesso del sito.
+- Con le email attive e `FRONTEND_BASE_URL` su `localhost` il backend registra un avviso: i link funzionerebbero solo su quel computer.
+
 ---
 
 ### 3.9 Sweeper delle scadenze
@@ -1517,6 +1535,7 @@ chiama.
 
 | Data | Step | Modifiche |
 |:--|:--|:--|
+| 13/10/2026 | **—** | **Email**: certificato SMTP verificato (prima `starttls()` senza contesto lo accettava qualunque) · supporto porta 465 (`SMTP_USE_SSL`) · intestazioni `Date`, `Message-ID`, `Reply-To` · `EMAIL_REPLY_TO` ed `EMAIL_CONTACT_PHONE` nel piè di pagina al posto del solo «non rispondere» · nome della struttura e colore del marchio dalla configurazione · `EMAIL_ENABLED=true` senza `SMTP_HOST` blocca l'avvio · nuovo `tests/test_email_delivery.py` |
 | 13/10/2026 | **—** | **Captcha**: `CaptchaValidationFailed` indica il campo (`details[].loc = captcha_token`) — `AppException` ha ora un attributo `field` facoltativo che l'handler espone nello stesso formato degli errori di validazione · `CAPTCHA_ENABLED=true` senza `CAPTCHA_SECRET_KEY` blocca l'avvio · un `.env` non valido non stampa più i valori letti (chiavi comprese) nell'errore d'avvio (`hide_input_in_errors`) · nuovo `tests/test_captcha.py` (configurazione, verifica del token, fail-open, risposta HTTP) |
 | 10/10/2026 | **—** | **Telefono dell'ospite internazionale** (debito #32): `GuestDataSchema.phone_number` accetta numeri di qualunque Paese e li salva normalizzati in E.164 (`validate_international_phone`); senza prefisso si assume +39, quindi i numeri a 10 cifre restano validi. Migrazione dati `c4d8f2a61b3e`: i `guest_phone` già salvati a 10 cifre diventano `+39…`. **Per l'Italia solo cellulari** (`3` + 9 cifre). Il telefono degli utenti registrati non cambia; i numeri già salvati non vengono rivalidati. +19 test schema, +2 admin. `ruff` in `requirements-dev.txt` |
 | 10/10/2026 | **—** | Pulizia (debito #10–#13, #16–#18): `model_config = ConfigDict(...)` al posto di `class Config` negli schemi delle anagrafiche; costante `HTTP_422_UNPROCESSABLE_CONTENT` (codice invariato); import inutilizzati rimossi; configurazione `ruff.toml`. Nessun cambiamento di comportamento: pytest senza avvisi |

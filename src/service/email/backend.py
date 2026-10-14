@@ -21,10 +21,11 @@ classe basta — nessun altro file la conosce.
 import asyncio
 import logging
 import smtplib
+import ssl
 from dataclasses import dataclass, field
 from email.message import EmailMessage as MimeMessage
-from email.utils import formataddr
-from typing import List
+from email.utils import formataddr, formatdate, make_msgid
+from typing import List, Optional
 
 try:  # pragma: no cover - dipende dalla versione di Python
     from typing import Protocol
@@ -74,6 +75,70 @@ class EmailBackend(Protocol):
         ...
 
 
+def _sender_domain() -> Optional[str]:
+    """Dominio del mittente, usato per il `Message-ID` (`noreply@dominio.it` → `dominio.it`)."""
+    domain = settings.email_from.partition("@")[2]
+    return domain or None
+
+
+def build_mime_message(message: EmailMessage) -> MimeMessage:
+    """
+    Messaggio MIME pronto per l'invio.
+
+    **`Date` e `Message-ID` si scrivono qui**: `smtplib` non li aggiunge, e non
+    tutti i server di invio lo fanno al posto nostro. Senza, il messaggio viola
+    la RFC 5322, guadagna punti di spam e Gmail può rifiutarlo.
+
+    `Reply-To` solo se configurato: il mittente è spesso una casella `noreply`,
+    e senza di esso la risposta di un ospite andrebbe persa.
+    """
+    mime = MimeMessage()
+    mime["Subject"] = message.subject
+    mime["From"] = formataddr((settings.email_from_name, settings.email_from))
+    mime["To"] = message.to
+    mime["Date"] = formatdate(usegmt=True)
+    mime["Message-ID"] = make_msgid(domain=_sender_domain())
+    if settings.email_reply_to:
+        mime["Reply-To"] = str(settings.email_reply_to)
+
+    # L'ordine conta: `set_content` definisce la parte testuale,
+    # `add_alternative` aggiunge quella HTML come versione preferita.
+    mime.set_content(message.text_body)
+    mime.add_alternative(message.html_body, subtype="html")
+    return mime
+
+
+def open_smtp_connection() -> smtplib.SMTP:
+    """
+    Apre la connessione al server SMTP, cifrata secondo la configurazione.
+
+    - `SMTP_USE_SSL` (porta 465): cifrata dal primo byte. Ha la precedenza.
+    - `SMTP_USE_TLS` (porta 587): connessione in chiaro promossa con STARTTLS.
+    - nessuno dei due: in chiaro, solo per server locali di sviluppo.
+
+    **Il certificato del server viene sempre verificato.** `starttls()` senza
+    contesto, in Python, usa un contesto che *non* lo controlla: chi si mette
+    in mezzo potrebbe fingersi il server di posta e leggere la password SMTP.
+    `create_default_context()` verifica catena e nome dell'host.
+    """
+    context = ssl.create_default_context()
+    timeout = settings.email_send_timeout_seconds
+
+    if settings.smtp_use_ssl:
+        return smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=timeout, context=context)
+
+    connection = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=timeout)
+    try:
+        if settings.smtp_use_tls:
+            connection.starttls(context=context)
+    except Exception:
+        # Certificato rifiutato o STARTTLS non supportato: si chiude il socket
+        # e si rinuncia, senza mai ripiegare su una connessione in chiaro.
+        connection.close()
+        raise
+    return connection
+
+
 class SmtpEmailBackend:
     """Consegna via SMTP, con la chiamata bloccante spostata fuori dall'event loop."""
 
@@ -82,26 +147,8 @@ class SmtpEmailBackend:
 
     @staticmethod
     def _send_sync(message: EmailMessage) -> None:
-        if not settings.smtp_host:
-            raise RuntimeError("smtp_host non configurato")
-
-        mime = MimeMessage()
-        mime["Subject"] = message.subject
-        mime["From"] = formataddr((settings.email_from_name, settings.email_from))
-        mime["To"] = message.to
-
-        # L'ordine conta: `set_content` definisce la parte testuale,
-        # `add_alternative` aggiunge quella HTML come versione preferita.
-        mime.set_content(message.text_body)
-        mime.add_alternative(message.html_body, subtype="html")
-
-        with smtplib.SMTP(
-                settings.smtp_host,
-                settings.smtp_port,
-                timeout=settings.email_send_timeout_seconds,
-        ) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
+        mime = build_mime_message(message)
+        with open_smtp_connection() as smtp:
             if settings.smtp_user and settings.smtp_password:
                 smtp.login(settings.smtp_user, settings.smtp_password.get_secret_value())
             smtp.send_message(mime)
@@ -181,4 +228,12 @@ class FailingEmailBackend:
 
 def build_default_backend() -> EmailBackend:
     """Sceglie il backend in base alla configurazione."""
-    return SmtpEmailBackend() if settings.email_enabled else ConsoleEmailBackend()
+    if not settings.email_enabled:
+        return ConsoleEmailBackend()
+    if "localhost" in settings.frontend_base_url or "127.0.0.1" in settings.frontend_base_url:
+        # Normale in sviluppo; in produzione i link delle email non funzionerebbero.
+        logger.warning(
+            "Email attive con FRONTEND_BASE_URL=%s: i link funzionano solo su questo computer",
+            settings.frontend_base_url,
+        )
+    return SmtpEmailBackend()

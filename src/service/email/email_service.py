@@ -56,6 +56,9 @@ BOOKING_PATH = "/prenotazione"
 #: conversione: i campi che le servono ci sono già.
 BookingView = Union[BookingPublicSchema, BookingSchema]
 
+#: Colore principale del marchio, lo stesso di `--color-primary` del frontend.
+BRAND_COLOR = "#2F3A2E"
+
 
 # --------------------------------------------------------------------------- #
 # Filtri di formattazione                                                      #
@@ -147,6 +150,14 @@ class EmailService:
         environment.filters["istante"] = format_datetime
         environment.filters["scadenza"] = format_deadline
         environment.filters["importo"] = format_money
+        # Dati della struttura, comuni a tutti i messaggi: un solo punto
+        # invece di un parametro ripetuto in ogni `send_*`.
+        environment.globals["struttura"] = {
+            "nome": settings.email_from_name,
+            "telefono": settings.email_contact_phone,
+            "rispondi": bool(settings.email_reply_to),
+            "colore": BRAND_COLOR,
+        }
         return environment
 
     # ------------------------------------------------------------------ #

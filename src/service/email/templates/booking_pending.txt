@@ -28,4 +28,4 @@ Totale:    {{ booking.total_price | importo }} {{ booking.currency }}
 Non hai richiesto tu questa prenotazione? Ignora il messaggio: senza conferma
 scade da sola e non ti verrà addebitato nulla.
 
-B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.
+{% include "_footer.txt" %}

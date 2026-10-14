@@ -31,4 +31,4 @@ Se non te lo aspettavi, contattaci: ti spiegheremo il motivo.
 Non sei stato tu ad annullare? Scrivici: ricostruiamo insieme cosa è successo.
 {% endif %}
 
-B&B Cosenza — messaggio automatico, non rispondere a questo indirizzo.
+{% include "_footer.txt" %}

@@ -22,9 +22,9 @@
                style="max-width:560px; background:#ffffff; border-radius:8px; overflow:hidden;">
 
           <tr>
-            <td style="background:#1f4e79; padding:20px 28px;">
+            <td style="background:{{ struttura.colore }}; padding:20px 28px;">
               <div style="color:#ffffff; font-size:17px; font-weight:600; letter-spacing:-0.2px;">
-                B&amp;B Cosenza
+                {{ struttura.nome }}
               </div>
             </td>
           </tr>
@@ -48,7 +48,18 @@
               Codice prenotazione <strong>{{ booking.code }}</strong> —
               conservalo per ogni comunicazione.
               <br>
+              {% if struttura.rispondi and struttura.telefono %}
+              Per qualsiasi necessità rispondi a questa email o chiamaci al
+              <a href="tel:{{ struttura.telefono | replace(' ', '') }}" style="color:#5c6370;">{{ struttura.telefono }}</a>.
+              {% elif struttura.rispondi %}
+              Per qualsiasi necessità rispondi a questa email.
+              {% elif struttura.telefono %}
+              Per qualsiasi necessità chiamaci al
+              <a href="tel:{{ struttura.telefono | replace(' ', '') }}" style="color:#5c6370;">{{ struttura.telefono }}</a>.
+              Questo messaggio è automatico: non rispondere a questo indirizzo.
+              {% else %}
               Questo messaggio è stato inviato automaticamente: non rispondere a questo indirizzo.
+              {% endif %}
             </td>
           </tr>
 

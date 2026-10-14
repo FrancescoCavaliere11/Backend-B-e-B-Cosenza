@@ -194,6 +194,27 @@ async def api_client(session_factory):
 
 
 @pytest.fixture(autouse=True)
+def development_mode(monkeypatch):
+    """
+    Ogni test parte con email e captcha **spenti**, qualunque cosa dica il `.env`.
+
+    I test leggono lo stesso `.env` dell'applicazione. Chi accende le email per
+    provare Gmail (`EMAIL_ENABLED=true`) faceva fallire 15 test: con le email
+    attive il backend, giustamente, non restituisce più `confirmation_token`
+    nella risposta, e i test che confermano una prenotazione lo leggono da lì.
+    Con `CAPTCHA_ENABLED=true` sarebbe successo lo stesso: i test non inviano
+    un token Turnstile.
+
+    `monkeypatch` cambia i valori solo in memoria e li ripristina a fine test;
+    il `.env` non viene toccato. I test che verificano proprio il
+    comportamento con email o captcha attivi li riaccendono da sé
+    (`test_captcha.py`, `test_email_delivery.py`, `test_booking_api.py`).
+    """
+    monkeypatch.setattr(settings, "email_enabled", False)
+    monkeypatch.setattr(settings, "captcha_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def email_backend():
     """
     Sostituisce il canale email con uno che registra i messaggi in memoria.

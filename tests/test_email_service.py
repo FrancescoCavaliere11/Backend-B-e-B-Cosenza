@@ -151,7 +151,7 @@ async def test_il_nome_ospite_non_puo_iniettare_markup(service, backend):
     assert "&lt;a href=" in html
 
 
-async def test_il_testo_semplice_non_viene_escapato(service, backend):
+async def test_il_testo_semplice_non_viene_escapato(monkeypatch, backend):
     """
     Nel testo semplice l'escaping sarebbe un danno: trasformerebbe i caratteri
     dei link in entità HTML, rendendoli inutilizzabili. E non c'è nulla da
@@ -160,6 +160,8 @@ async def test_il_testo_semplice_non_viene_escapato(service, backend):
     La firma "B&B Cosenza" è il caso di prova più immediato: nella versione
     HTML compare come `B&amp;B`, in quella testuale deve restare `B&B`.
     """
+    monkeypatch.setattr(settings, "email_from_name", "B&B Cosenza")
+    service = EmailService(backend=backend)
     await service.send_booking_pending(build_booking(), "token")
 
     messaggio = backend.last

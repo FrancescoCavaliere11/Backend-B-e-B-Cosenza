@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr, model_validator
+from pydantic import EmailStr, SecretStr, model_validator
 
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
@@ -195,8 +195,17 @@ class Settings(BaseSettings):
     smtp_user: Optional[str] = None
     smtp_password: Optional[SecretStr] = None
     smtp_use_tls: bool = True
+    #: Connessione cifrata dal primo byte (porta 465). Ha la precedenza su
+    #: `smtp_use_tls`, che vale per la porta 587 (STARTTLS).
+    smtp_use_ssl: bool = False
     email_from: str = "noreply@bbcosenza.it"
+    #: Nome del mittente, usato anche come nome della struttura nelle email.
     email_from_name: str = "B&B Cosenza"
+    #: Casella che riceve le risposte degli ospiti (`Reply-To`). Senza, le
+    #: email invitano a non rispondere.
+    email_reply_to: Optional[EmailStr] = None
+    #: Telefono della struttura, mostrato in fondo a ogni email.
+    email_contact_phone: Optional[str] = None
     #: Timeout della connessione SMTP. Volutamente basso: l'invio gira in
     #: background, ma un socket appeso tiene comunque occupato un thread.
     email_send_timeout_seconds: int = 10
@@ -243,6 +252,18 @@ class Settings(BaseSettings):
         """
         if self.captcha_enabled and not (self.captcha_secret_key and self.captcha_secret_key.get_secret_value().strip()):
             raise ValueError("CAPTCHA_ENABLED=true richiede CAPTCHA_SECRET_KEY nel file .env")
+        return self
+
+    @model_validator(mode="after")
+    def _check_email(self) -> "Settings":
+        """
+        Email attive senza server SMTP: il backend non parte.
+
+        Altrimenti ogni invio fallirebbe con una sola riga nel log, e la prima
+        a accorgersene sarebbe un ospite che aspetta il link di conferma.
+        """
+        if self.email_enabled and not (self.smtp_host and self.smtp_host.strip()):
+            raise ValueError("EMAIL_ENABLED=true richiede SMTP_HOST nel file .env")
         return self
 
 

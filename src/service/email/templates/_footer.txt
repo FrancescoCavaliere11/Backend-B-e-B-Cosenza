@@ -1,0 +1,12 @@
+{# Chiusura comune dei messaggi in testo semplice. #}
+{{ struttura.nome }}
+{% if struttura.rispondi and struttura.telefono %}
+Per qualsiasi necessità rispondi a questa email o chiamaci al {{ struttura.telefono }}.
+{% elif struttura.rispondi %}
+Per qualsiasi necessità rispondi a questa email.
+{% elif struttura.telefono %}
+Per qualsiasi necessità chiamaci al {{ struttura.telefono }}.
+Messaggio automatico: non rispondere a questo indirizzo.
+{% else %}
+Messaggio automatico: non rispondere a questo indirizzo.
+{% endif %}
