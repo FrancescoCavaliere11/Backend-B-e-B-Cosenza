@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import update
 
+from src.security.validators import today_in_app_timezone
 from src.data.enumerators import PaymentMethod, PaymentStatus
 from src.data.model.booking import Booking
 
@@ -761,18 +762,31 @@ class TestStatusResponseAndEmails:
 # Partenza anticipata e mancata presentazione (07/10/2026)
 # ===========================================================================
 
-TODAY = date.today()
-#: Soggiorno in corso: arrivato da due giorni, parte fra due.
-ONGOING_CHECK_IN = TODAY - timedelta(days=2)
-ONGOING_CHECK_OUT = TODAY + timedelta(days=2)
+# Funzioni e non costanti: calcolate al momento del test, nel fuso della
+# struttura. Una costante calcolata al caricamento del modulo diventava «ieri»
+# se la suite passava la mezzanotte mentre girava.
+
+
+def today() -> date:
+    return today_in_app_timezone()
+
+
+def ongoing_check_in() -> date:
+    """Soggiorno in corso: arrivato da due giorni…"""
+    return today() - timedelta(days=2)
+
+
+def ongoing_check_out() -> date:
+    """…e parte fra due."""
+    return today() + timedelta(days=2)
 
 
 async def _ongoing_booking(admin_client, room_id, **overrides) -> dict:
     return await _create_booking(
         admin_client,
         [room_id],
-        check_in=overrides.pop("check_in", ONGOING_CHECK_IN).isoformat(),
-        check_out=overrides.pop("check_out", ONGOING_CHECK_OUT).isoformat(),
+        check_in=overrides.pop("check_in", ongoing_check_in()).isoformat(),
+        check_out=overrides.pop("check_out", ongoing_check_out()).isoformat(),
         **overrides,
     )
 
@@ -851,7 +865,7 @@ class TestEarlyDepartureAndNoShow:
         assert dettaglio.json()["status"] == "CHECKED_IN"
 
     async def test_conclusione_il_giorno_dell_arrivo_rifiutata(self, admin_client, rooms):
-        booking = await _ongoing_booking(admin_client, rooms[0].id, check_in=TODAY)
+        booking = await _ongoing_booking(admin_client, rooms[0].id, check_in=today())
         await _status(admin_client, booking["id"], "CHECKED_IN")
 
         response = await _status(admin_client, booking["id"], "COMPLETED", "Ripensamento")
@@ -869,8 +883,8 @@ class TestEarlyDepartureAndNoShow:
             BASE + "/",
             json=_create_payload(
                 [rooms[0].id],
-                check_in=TODAY.isoformat(),
-                check_out=ONGOING_CHECK_OUT.isoformat(),
+                check_in=today().isoformat(),
+                check_out=ongoing_check_out().isoformat(),
                 guest={**GUEST, "email": "subentro@example.com"},
             ),
         )
@@ -887,8 +901,8 @@ class TestEarlyDepartureAndNoShow:
             f"{PUBLIC}/occupancy",
             params={
                 "room_ids": str(rooms[0].id),
-                "date_from": TODAY.isoformat(),
-                "date_to": (ONGOING_CHECK_OUT + timedelta(days=1)).isoformat(),
+                "date_from": today().isoformat(),
+                "date_to": (ongoing_check_out() + timedelta(days=1)).isoformat(),
             },
         )
         assert occupazione.status_code == 200, occupazione.text
@@ -899,8 +913,8 @@ class TestEarlyDepartureAndNoShow:
             BASE + "/",
             json=_create_payload(
                 [rooms[0].id],
-                check_in=TODAY.isoformat(),
-                check_out=ONGOING_CHECK_OUT.isoformat(),
+                check_in=today().isoformat(),
+                check_out=ongoing_check_out().isoformat(),
                 guest={**GUEST, "email": "subentro@example.com"},
             ),
         )
@@ -915,8 +929,8 @@ class TestEarlyDepartureAndNoShow:
             BASE + "/",
             json=_create_payload(
                 [rooms[0].id],
-                check_in=ONGOING_CHECK_IN.isoformat(),
-                check_out=TODAY.isoformat(),
+                check_in=ongoing_check_in().isoformat(),
+                check_out=today().isoformat(),
                 guest={**GUEST, "email": "walkin@example.com"},
             ),
         )

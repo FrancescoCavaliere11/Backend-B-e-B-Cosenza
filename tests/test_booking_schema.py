@@ -9,7 +9,7 @@ Esecuzione, dalla root del progetto:
 
     pytest
 """
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -38,9 +38,21 @@ from src.data.schemas.booking_schema import (
 )
 from src.security.validators import today_in_app_timezone
 
-TODAY = today_in_app_timezone()
-TOMORROW = TODAY + timedelta(days=1)
-NEXT_WEEK = TODAY + timedelta(days=7)
+# Funzioni e non costanti: calcolate al momento del test. Una costante
+# calcolata al caricamento del modulo diventava «ieri» se la suite passava la
+# mezzanotte mentre girava, e i test sulle date fallivano.
+
+
+def today() -> date:
+    return today_in_app_timezone()
+
+
+def tomorrow() -> date:
+    return today() + timedelta(days=1)
+
+
+def next_week() -> date:
+    return today() + timedelta(days=7)
 
 VALID_GUEST = {
     "firstname": "Mario",
@@ -54,8 +66,8 @@ VALID_QUOTE_TOKEN = "x" * 40
 
 def _quote_payload(**overrides):
     payload = {
-        "check_in": TOMORROW,
-        "check_out": TOMORROW + timedelta(days=3),
+        "check_in": tomorrow(),
+        "check_out": tomorrow() + timedelta(days=3),
         "guest_count": 2,
         "room_ids": [uuid4()],
         "payment_option": PaymentOption.PAY_ON_ARRIVAL,
@@ -72,42 +84,42 @@ class TestDateRange:
 
     def test_intervallo_valido(self):
         schema = AvailabilityRequestSchema(
-            check_in=TOMORROW, check_out=TOMORROW + timedelta(days=2), guest_count=2
+            check_in=tomorrow(), check_out=tomorrow() + timedelta(days=2), guest_count=2
         )
         assert schema.check_out > schema.check_in
 
     def test_soggiorno_di_zero_notti_rifiutato(self):
         with pytest.raises(ValidationError, match="successiva"):
-            AvailabilityRequestSchema(check_in=TOMORROW, check_out=TOMORROW, guest_count=1)
+            AvailabilityRequestSchema(check_in=tomorrow(), check_out=tomorrow(), guest_count=1)
 
     def test_check_out_precedente_al_check_in_rifiutato(self):
         with pytest.raises(ValidationError, match="successiva"):
             AvailabilityRequestSchema(
-                check_in=NEXT_WEEK, check_out=TOMORROW, guest_count=1
+                check_in=next_week(), check_out=tomorrow(), guest_count=1
             )
 
     def test_check_in_nel_passato_rifiutato_sui_contratti_pubblici(self):
         with pytest.raises(ValidationError, match="passato"):
             AvailabilityRequestSchema(
-                check_in=TODAY - timedelta(days=1), check_out=TOMORROW, guest_count=1
+                check_in=today() - timedelta(days=1), check_out=tomorrow(), guest_count=1
             )
 
     def test_check_in_oggi_consentito(self):
         """Una prenotazione last-minute per la notte stessa è legittima."""
         schema = AvailabilityRequestSchema(
-            check_in=TODAY, check_out=TOMORROW, guest_count=1
+            check_in=today(), check_out=tomorrow(), guest_count=1
         )
-        assert schema.check_in == TODAY
+        assert schema.check_in == today()
 
     def test_soggiorno_troppo_lungo_rifiutato(self):
-        troppo_lungo = TOMORROW + timedelta(days=settings.booking_max_nights + 1)
+        troppo_lungo = tomorrow() + timedelta(days=settings.booking_max_nights + 1)
         with pytest.raises(ValidationError, match="non può superare"):
             AvailabilityRequestSchema(
-                check_in=TOMORROW, check_out=troppo_lungo, guest_count=1
+                check_in=tomorrow(), check_out=troppo_lungo, guest_count=1
             )
 
     def test_anticipo_eccessivo_rifiutato(self):
-        troppo_avanti = TODAY + timedelta(days=settings.booking_max_advance_days + 10)
+        troppo_avanti = today() + timedelta(days=settings.booking_max_advance_days + 10)
         with pytest.raises(ValidationError, match="anticipo"):
             AvailabilityRequestSchema(
                 check_in=troppo_avanti,
@@ -161,8 +173,8 @@ class TestRoomSelection:
 def _occupancy_payload(**overrides) -> dict:
     payload = {
         "room_ids": [uuid4()],
-        "date_from": TODAY,
-        "date_to": TODAY + timedelta(days=61),
+        "date_from": today(),
+        "date_to": today() + timedelta(days=61),
     }
     payload.update(overrides)
     return payload
@@ -172,29 +184,29 @@ class TestOccupancyRequest:
 
     def test_finestra_valida(self):
         schema = OccupancyRequestSchema(**_occupancy_payload())
-        assert schema.date_from == TODAY
+        assert schema.date_from == today()
 
     def test_finestra_della_massima_ampiezza_ammessa(self):
         massima = settings.occupancy_max_window_days
-        OccupancyRequestSchema(**_occupancy_payload(date_to=TODAY + timedelta(days=massima)))
+        OccupancyRequestSchema(**_occupancy_payload(date_to=today() + timedelta(days=massima)))
 
     def test_finestra_troppo_ampia_rifiutata(self):
         oltre = settings.occupancy_max_window_days + 1
         with pytest.raises(ValidationError, match="non può superare"):
-            OccupancyRequestSchema(**_occupancy_payload(date_to=TODAY + timedelta(days=oltre)))
+            OccupancyRequestSchema(**_occupancy_payload(date_to=today() + timedelta(days=oltre)))
 
     @pytest.mark.parametrize("giorni", [0, -1])
     def test_data_finale_non_successiva_rifiutata(self, giorni):
         with pytest.raises(ValidationError, match="successiva"):
-            OccupancyRequestSchema(**_occupancy_payload(date_to=TODAY + timedelta(days=giorni)))
+            OccupancyRequestSchema(**_occupancy_payload(date_to=today() + timedelta(days=giorni)))
 
     def test_finestra_che_parte_nel_passato_rifiutata(self):
         with pytest.raises(ValidationError, match="passato"):
-            OccupancyRequestSchema(**_occupancy_payload(date_from=TODAY - timedelta(days=1)))
+            OccupancyRequestSchema(**_occupancy_payload(date_from=today() - timedelta(days=1)))
 
     def test_finestra_oltre_il_limite_di_prenotazione_rifiutata(self):
         limite = settings.booking_max_advance_days + settings.booking_max_nights
-        date_to = TODAY + timedelta(days=limite + 1)
+        date_to = today() + timedelta(days=limite + 1)
         with pytest.raises(ValidationError, match="limite di prenotazione"):
             OccupancyRequestSchema(
                 **_occupancy_payload(date_from=date_to - timedelta(days=30), date_to=date_to)
@@ -332,8 +344,8 @@ class TestAdminBookingCreate:
 
     def _payload(self, **overrides):
         payload = {
-            "check_in": TOMORROW,
-            "check_out": TOMORROW + timedelta(days=2),
+            "check_in": tomorrow(),
+            "check_out": tomorrow() + timedelta(days=2),
             "guest_count": 2,
             "room_ids": [uuid4()],
             "payment_option": PaymentOption.PAY_ON_ARRIVAL,
@@ -367,7 +379,7 @@ class TestAdminBookingCreate:
         correggere un inserimento sbagliato. La protezione dal refuso è
         l'avviso di conferma lato frontend.
         """
-        ieri = TODAY - timedelta(days=1)
+        ieri = today() - timedelta(days=1)
         schema = AdminBookingCreateSchema(
             **self._payload(check_in=ieri, check_out=ieri + timedelta(days=2))
         )
@@ -376,7 +388,7 @@ class TestAdminBookingCreate:
     def test_intervallo_incoerente_rifiutato_anche_allo_staff(self):
         with pytest.raises(ValidationError, match="successiva"):
             AdminBookingCreateSchema(
-                **self._payload(check_in=NEXT_WEEK, check_out=TOMORROW)
+                **self._payload(check_in=next_week(), check_out=tomorrow())
             )
 
     def test_metodo_di_pagamento_manuale_accettato(self):
@@ -555,7 +567,7 @@ class TestSearchFilters:
 
     def test_intervallo_invertito_rifiutato(self):
         with pytest.raises(ValidationError, match="precedere"):
-            BookingSearchFiltersSchema(date_from=NEXT_WEEK, date_to=TODAY)
+            BookingSearchFiltersSchema(date_from=next_week(), date_to=today())
 
     def test_page_size_oltre_il_limite_rifiutata(self):
         with pytest.raises(ValidationError):

@@ -3,12 +3,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status, Form, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Annotated, List, Optional
-import json
 
 from src.config.database_config import get_async_session
 from src.data.model.user import User
 from src.data.repository.extra_service_repository import ExtraServiceRepository
 from src.data.schemas.extra_service_schema import ExtraServiceCreateSchema, ExtraServiceSchema, ExtraServiceUpdateSchema
+from src.routers.dependencies import parse_form_model
 from src.security.authorization import is_admin_user
 from src.service.extra_service_service import ExtraServiceService
 
@@ -33,8 +33,8 @@ async def create_extra_service(
     extra_service_service: Annotated[ExtraServiceService, Depends(get_extra_service_service)],
     current_user: Annotated[User, Depends(is_admin_user)]
 ) -> ExtraServiceSchema:
-    extra_service_data_json = json.loads(extra_service_form)
-    payload = ExtraServiceCreateSchema(**extra_service_data_json)
+    # Dati del client: un errore è un 422, non un 500 (lacuna B15).
+    payload = parse_form_model(ExtraServiceCreateSchema, extra_service_form)
     return await extra_service_service.create_extra_service(
         payload=payload,
         image=image,
@@ -49,8 +49,7 @@ async def update_extra_service(
         current_user: Annotated[User, Depends(is_admin_user)],
         image: Annotated[Optional[UploadFile], File()] = None,
 ):
-    extra_service_data_json = json.loads(extra_service_form)
-    payload = ExtraServiceUpdateSchema(**extra_service_data_json)
+    payload = parse_form_model(ExtraServiceUpdateSchema, extra_service_form)
     return await extra_service_service.update_extra_service(
         payload=payload,
         image=image,
@@ -58,9 +57,9 @@ async def update_extra_service(
     )
 
 @extra_service_router.delete("/{extra_service_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_room_service(
+async def delete_extra_service(
     extra_service_id: UUID,
-    room_service_service: Annotated[ExtraServiceService, Depends(get_extra_service_service)],
+    extra_service_service: Annotated[ExtraServiceService, Depends(get_extra_service_service)],
     current_user: Annotated[User, Depends(is_admin_user)]
-) -> None :
-    await room_service_service.delete_extra_service(extra_service_id=extra_service_id)
+) -> None:
+    await extra_service_service.delete_extra_service(extra_service_id=extra_service_id)

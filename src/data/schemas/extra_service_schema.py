@@ -16,9 +16,10 @@ class ExtraServiceSchema(CustomModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class ExtraServiceCreateSchema(CustomModel):
-    name: str = Field(min_length=2, max_length=100)
+class ExtraServiceFormSchema(CustomModel):
+    """Campi e regole comuni a creazione e modifica di un servizio extra."""
 
+    name: str = Field(min_length=2, max_length=100)
     description: Optional[str] = Field(default=None, max_length=200)
 
     @field_validator('name')
@@ -28,25 +29,17 @@ class ExtraServiceCreateSchema(CustomModel):
 
     @field_validator('description')
     @classmethod
-    def validate_description(cls, value: str) -> Optional[str]:
+    def validate_description(cls, value: Optional[str]) -> Optional[str]:
         if value is None or value == "":
             return None
         return validate_extra_service_description(value)
 
 
-class ExtraServiceUpdateSchema(CustomModel):
+class ExtraServiceCreateSchema(ExtraServiceFormSchema):
+    """Creazione di un servizio extra."""
+
+
+class ExtraServiceUpdateSchema(ExtraServiceFormSchema):
+    """Modifica completa: il client manda sempre il form intero, più l'`id`."""
+
     id: UUID = Field()
-    name: str = Field(min_length=2, max_length=100)
-    description: Optional[str] = Field(default=None, max_length=200)
-
-    @field_validator('name')
-    @classmethod
-    def validate_name(cls, value) -> str:
-        return validate_extra_service_name(value)
-
-    @field_validator('description')
-    @classmethod
-    def validate_description(cls, value) -> Optional[str]:
-        if value is None or value == "":
-            return None
-        return validate_extra_service_description(value)
