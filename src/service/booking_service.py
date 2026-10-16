@@ -2198,6 +2198,8 @@ class BookingService:
             payment_option=booking.payment_option,
             payment_status=booking.payment_status,
             payment_method=booking.payment_method,
+            card_brand=booking.card_brand,
+            card_last4=booking.card_last4,
             hold_expires_at=booking.hold_expires_at,
             confirmed_at=booking.confirmed_at,
             cancelled_at=booking.cancelled_at,

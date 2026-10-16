@@ -705,6 +705,37 @@ async def test_il_pagamento_online_lascia_le_sue_voci_nello_storico(
     assert all("actor_id" not in voce for voce in storico)
 
 
+async def test_la_carta_compare_nella_scheda_admin_e_non_all_ospite(
+        api_client, admin_client, rooms, stripe_gateway
+):
+    """
+    Circuito e ultime cifre sono per il back-office: la scheda admin li
+    mostra, la ricerca pubblica dell'ospite no.
+    """
+    prenotazione = await _crea_prenotazione_da_pagare(api_client, rooms[0].id)
+    await _avvia_pagamento(api_client, prenotazione["code"])
+    intent_id = list(stripe_gateway.intents)[0]
+    stripe_gateway.authorize(intent_id)
+    await _notifica(
+        api_client,
+        _evento("payment_intent.amount_capturable_updated", _intent_autorizzato(intent_id)),
+    )
+
+    elenco = await admin_client.get(
+        "/api/v1/admin/bookings/", params={"code": prenotazione["code"]}
+    )
+    scheda = await admin_client.get(f"/api/v1/admin/bookings/{elenco.json()['items'][0]['id']}")
+    assert (scheda.json()["card_brand"], scheda.json()["card_last4"]) == ("visa", "4242")
+
+    pubblica = await api_client.post(
+        f"{BOOKINGS}/lookup",
+        json={"code": prenotazione["code"], "email": GUEST["email"]},
+    )
+    assert pubblica.status_code == 200, pubblica.text
+    assert "card_brand" not in pubblica.json()
+    assert "card_last4" not in pubblica.json()
+
+
 async def test_lo_stesso_rimborso_notificato_due_volte_lascia_una_voce(
         api_client, admin_client, rooms, stripe_gateway
 ):

@@ -83,6 +83,10 @@ def from_minor_units(amount: int, currency: str) -> Decimal:
     return (Decimal(amount) / _HUNDRED).quantize(Decimal("0.01"))
 
 
+#: Metodi di pagamento accettati. Decisi qui, non dal cruscotto Stripe, così
+#: test e produzione si comportano allo stesso modo.
+PAYMENT_METHOD_TYPES = ("card",)
+
 #: Espansione chiesta a ogni chiamata che restituisce un Payment Intent: senza,
 #: `latest_charge` è solo un identificativo e i dati della carta non ci sono.
 _EXPAND_CHARGE = ["latest_charge"]
@@ -230,7 +234,12 @@ class LiveStripeGateway:
             amount=amount_cents,
             currency=currency.lower(),
             capture_method="manual",
-            automatic_payment_methods={"enabled": True},
+            # Solo carte (Apple Pay e Google Pay compresi: per Stripe sono
+            # carte). Con `automatic_payment_methods` l'elenco lo decideva il
+            # cruscotto, e comparivano Klarna, Amazon Pay, Satispay: metodi
+            # che portano l'ospite fuori dal sito e gestiscono l'incasso
+            # differito con regole proprie, mai collaudati (16/10/2026).
+            payment_method_types=list(PAYMENT_METHOD_TYPES),
             metadata={"booking_code": booking_code, **(metadata or {})},
             idempotency_key=f"booking-{booking_code}",
             expand=_EXPAND_CHARGE,

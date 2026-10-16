@@ -132,6 +132,24 @@ class TestLiveGatewayResponses:
         assert all(kwargs.get("expand") == ["latest_charge"] for _, _, kwargs in stripe.calls)
 
 
+    async def test_il_pagamento_accetta_solo_carte(self):
+        """
+        I metodi li decide il codice, non il cruscotto: con i metodi
+        automatici comparivano Klarna, Amazon Pay e Satispay, che portano
+        l'ospite fuori dal sito e non sono mai stati collaudati.
+        """
+        stripe = _FakeStripe(_intent())
+
+        await LiveStripeGateway(stripe_module=stripe).create_payment_intent(
+            18000, "EUR", "BB-2026-000001"
+        )
+
+        name, _, kwargs = stripe.calls[0]
+        assert name == "create"
+        assert kwargs["payment_method_types"] == ["card"]
+        assert "automatic_payment_methods" not in kwargs
+
+
 class TestStripeObjects:
     """La libreria restituisce oggetti senza `.get()`: il gateway li converte al confine."""
 

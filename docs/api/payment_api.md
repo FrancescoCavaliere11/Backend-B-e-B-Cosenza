@@ -79,6 +79,15 @@ secondo o due che serve al backend per incassare, e poi verificare l'esito.
 direttamente a Stripe tramite Stripe.js / Payment Element; noi maneggiamo solo
 identificativi opachi (`pi_...`, `client_secret`).
 
+**Solo carte** *(dal 16/10/2026)*. Il Payment Intent si crea con
+`payment_method_types=["card"]` (costante `PAYMENT_METHOD_TYPES` in
+`gateway.py`), non più con `automatic_payment_methods`: l'elenco dei metodi lo
+decide il codice, non il cruscotto Stripe. Apple Pay e Google Pay restano
+disponibili (per Stripe sono carte); Klarna, Amazon Pay, Satispay e Link no,
+perché portano l'ospite fuori dal sito e gestiscono l'incasso differito con
+regole proprie. Il ritorno da una verifica della banca con reindirizzamento
+resta comunque da gestire (lacuna B14).
+
 Dopo l'incasso conserviamo **circuito e ultime quattro cifre** (`card_brand`,
 `card_last4`), che servono al back-office per riconoscere un pagamento e non
 sono dati di autenticazione.
