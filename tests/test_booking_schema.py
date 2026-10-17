@@ -251,41 +251,62 @@ class TestGuestData:
 
 
 class TestInternationalPhone:
-    """
-    Telefono dell'ospite: qualunque Paese, salvato in E.164 (debito #32).
-    Per l'Italia solo cellulari a 10 cifre (decisione del 10/10/2026).
-    """
+    """Telefono dell'ospite: solo cellulari, regole per Paese, salvato in E.164."""
 
     @pytest.mark.parametrize("raw, expected", [
-        ("3331234567", "+393331234567"),           # italiano senza prefisso: come prima
+        ("3331234567", "+393331234567"),           # senza prefisso: Italia
         ("+39 333 123 4567", "+393331234567"),
         ("0039 333-123-4567", "+393331234567"),    # 00 al posto di +
-        ("+44 20 7946 0958", "+442079460958"),
-        ("+1 (212) 555-0100", "+12125550100"),
-        ("+49.30.1234567", "+49301234567"),
-        (" +33 1 23 45 67 89 ", "+33123456789"),   # spazi ai bordi tollerati
+        (" +39 312 345 6789 ", "+393123456789"),   # spazi ai bordi tollerati
+        ("+33 6 12 34 56 78", "+33612345678"),     # Francia: 9 cifre
+        ("+49 1512 3456789", "+4915123456789"),    # Germania: 11 cifre
+        ("+34 612 34 56 78", "+34612345678"),      # Spagna: 9 cifre
+        ("+41 78 123 45 67", "+41781234567"),      # Svizzera
+        ("+43 664 123456", "+43664123456"),        # Austria
+        ("+31 6 12345678", "+31612345678"),        # Paesi Bassi
+        ("+32 470 12 34 56", "+32470123456"),      # Belgio
+        ("+44 7400 123456", "+447400123456"),      # Regno Unito
+        ("+1 (201) 555-0123", "+12015550123"),     # Stati Uniti: «fisso o cellulare», accettato
+        ("+351 912 345 678", "+351912345678"),     # «Altro prefisso»: Portogallo
     ])
-    def test_numeri_validi_normalizzati(self, raw, expected):
+    def test_cellulari_validi_normalizzati(self, raw, expected):
         assert GuestDataSchema(**{**VALID_GUEST, "phone_number": raw}).phone_number == expected
+
+    @pytest.mark.parametrize("raw", [
+        "0984 123456",            # Italia
+        "+39 0984 1234567",
+        "+33 1 23 45 67 89",      # Francia
+        "+49 30 123456",          # Germania
+        "+34 810 12 34 56",       # Spagna
+        "+41 44 668 18 00",       # Svizzera
+        "+31 10 123 4567",        # Paesi Bassi
+        "+32 12 34 56 78",        # Belgio
+        "+44 121 234 5678",       # Regno Unito
+    ])
+    def test_i_fissi_sono_rifiutati(self, raw):
+        with pytest.raises(ValidationError, match="cellulare"):
+            GuestDataSchema(**{**VALID_GUEST, "phone_number": raw})
 
     @pytest.mark.parametrize("raw", [
         "+39 333 12a 4567",       # lettere
         "+0 333 1234567",         # il prefisso non inizia con 0
         "+1 234",                 # troppo corto
-        "+39 1234 5678 9012 345", # oltre 15 cifre
+        "+39 1234 5678 9012 345", # troppo lungo
         "++39 3331234567",        # «+» ripetuto
         "333+1234567",            # «+» in mezzo
-        "0984 123456",            # fisso italiano: solo cellulari
-        "+39 0984 1234567",       # fisso italiano con prefisso
-        "333 123456",             # cellulare italiano a 9 cifre (vecchio formato)
-        "+39 333 123 45678",      # cellulare italiano a 11 cifre
+        "+33 6 12 34 56 7",       # Francia: una cifra in meno
+        "+999 123456789",         # prefisso inesistente
     ])
     def test_numeri_non_validi_rifiutati(self, raw):
         with pytest.raises(ValidationError):
             GuestDataSchema(**{**VALID_GUEST, "phone_number": raw})
 
-    def test_per_l_italia_il_messaggio_chiede_un_cellulare(self):
-        with pytest.raises(ValidationError, match="cellulare"):
+    def test_il_messaggio_indica_prefisso_ed_esempio(self):
+        with pytest.raises(ValidationError, match=r"prefisso \+33\. Esempio: \+33 6"):
+            GuestDataSchema(**{**VALID_GUEST, "phone_number": "+33 6 12 34 56 7"})
+
+    def test_per_un_fisso_il_messaggio_chiede_un_cellulare(self):
+        with pytest.raises(ValidationError, match="Serve un numero di cellulare"):
             GuestDataSchema(**{**VALID_GUEST, "phone_number": "0984 123456"})
 
     def test_il_messaggio_d_errore_e_in_italiano(self):

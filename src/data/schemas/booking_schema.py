@@ -728,9 +728,7 @@ class BookingSchema(CustomModel):
     payment_option: PaymentOption
     payment_status: PaymentStatus
     payment_method: Optional[PaymentMethod]
-    #: Circuito e ultime quattro cifre della carta, valorizzati solo per i
-    #: pagamenti online (dal webhook di Stripe). Non sono dati sensibili ai
-    #: fini PCI, ma all'ospite non servono: assenti da `BookingPublicSchema`.
+    #: Solo pagamenti online; volutamente assenti dalla vista pubblica.
     card_brand: Optional[str] = None
     card_last4: Optional[str] = None
 

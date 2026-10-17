@@ -1,7 +1,7 @@
 # API REFERENCE — Modulo Booking
 
 **Backend Gestionale B&B Cosenza**
-Versione API `v1` · Documento aggiornato al **14 ottobre 2026** · Copertura: Step A → G
+Versione API `v1` · Documento aggiornato al **16 ottobre 2026** · Copertura: Step A → G
 
 > I pagamenti online hanno un documento proprio: `payment_api.md`.
 
@@ -1097,7 +1097,7 @@ curl -b cookies.txt "http://localhost:8000/api/v1/admin/bookings/planning?date_f
 | `firstname` | string | sì | 2–50 caratteri, senza spazi esterni |
 | `lastname` | string | sì | 2–50 caratteri, senza spazi esterni |
 | `email` | string | sì | email valida (RFC) |
-| `phone_number` | string | sì | *(dal 10/10/2026)* qualunque Paese: 4–25 caratteri in ingresso, con spazi, trattini, punti, barre e parentesi tollerati; `00` vale come `+`; **senza prefisso si assume l'Italia (+39)**. Salvato **normalizzato in E.164** (`+393331234567`, al massimo 15 cifre dopo il `+`). **Per l'Italia solo cellulari**: `+39`, poi `3` e altre nove cifre (fissi e vecchi cellulari a 9 cifre rifiutati). Per gli altri Paesi solo la forma; la lunghezza del numero nazionale (10 cifre per tutti, per ora) la controlla il form (debito #40). Prima: esattamente 10 cifre italiane |
+| `phone_number` | string | sì | *(dal 10/10/2026)* qualunque Paese: 4–25 caratteri in ingresso, con spazi, trattini, punti, barre e parentesi tollerati; `00` vale come `+`; **senza prefisso si assume l'Italia (+39)**. Salvato **normalizzato in E.164** (`+393331234567`, al massimo 15 cifre dopo il `+`). **Solo cellulari, per ogni Paese** *(dal 16/10/2026, debito #40)*: lunghezze e numerazioni dalla libreria di Google (`phonenumberslite`); un fisso è rifiutato con «Serve un numero di cellulare, non un fisso. Esempio: …», un numero di lunghezza o prefisso sbagliati con «Numero di cellulare non valido per il prefisso +33. Esempio: +33 6 12 34 56 78». Accettati anche i numeri «fisso o cellulare» (Stati Uniti, Canada e pochi altri, dove i due formati coincidono). Prima: per l'Italia `3` + 9 cifre, per gli altri Paesi solo la forma |
 
 #### `GuestBookingCreateSchema`
 
@@ -1543,6 +1543,7 @@ chiama.
 | 14/10/2026 | **—** | **Login protetto dai tentativi ripetuti** (debito #19): limite per IP, per account + IP e per account sui fallimenti; `InvalidCredentials` (401) al posto di `HTTPException` nel service; `AppException` può portare intestazioni; log dei tentativi con email mascherata; mascheratura spostata in `src/security/masking.py`. Nuovo `tests/test_auth_rate_limit.py` |
 | 13/10/2026 | **—** | **Email**: certificato SMTP verificato (prima `starttls()` senza contesto lo accettava qualunque) · supporto porta 465 (`SMTP_USE_SSL`) · intestazioni `Date`, `Message-ID`, `Reply-To` · `EMAIL_REPLY_TO` ed `EMAIL_CONTACT_PHONE` nel piè di pagina al posto del solo «non rispondere» · nome della struttura e colore del marchio dalla configurazione · `EMAIL_ENABLED=true` senza `SMTP_HOST` blocca l'avvio · nuovo `tests/test_email_delivery.py` |
 | 13/10/2026 | **—** | **Captcha**: `CaptchaValidationFailed` indica il campo (`details[].loc = captcha_token`) — `AppException` ha ora un attributo `field` facoltativo che l'handler espone nello stesso formato degli errori di validazione · `CAPTCHA_ENABLED=true` senza `CAPTCHA_SECRET_KEY` blocca l'avvio · un `.env` non valido non stampa più i valori letti (chiavi comprese) nell'errore d'avvio (`hide_input_in_errors`) · nuovo `tests/test_captcha.py` (configurazione, verifica del token, fail-open, risposta HTTP) |
+| 16/10/2026 | **—** | **Cellulari per Paese** (debito #40): `validate_international_phone` usa `phonenumbers` — lunghezze reali (Francia 9 cifre, Germania 10–11, …), fissi rifiutati, «fisso o cellulare» accettato, messaggio con esempio del Paese. I vecchi cellulari italiani a 9 cifre ora passano (si segue la libreria). Il form del sito e dell'admin fa lo stesso controllo con `libphonenumber-js` |
 | 10/10/2026 | **—** | **Telefono dell'ospite internazionale** (debito #32): `GuestDataSchema.phone_number` accetta numeri di qualunque Paese e li salva normalizzati in E.164 (`validate_international_phone`); senza prefisso si assume +39, quindi i numeri a 10 cifre restano validi. Migrazione dati `c4d8f2a61b3e`: i `guest_phone` già salvati a 10 cifre diventano `+39…`. **Per l'Italia solo cellulari** (`3` + 9 cifre). Il telefono degli utenti registrati non cambia; i numeri già salvati non vengono rivalidati. +19 test schema, +2 admin. `ruff` in `requirements-dev.txt` |
 | 10/10/2026 | **—** | Pulizia (debito #10–#13, #16–#18): `model_config = ConfigDict(...)` al posto di `class Config` negli schemi delle anagrafiche; costante `HTTP_422_UNPROCESSABLE_CONTENT` (codice invariato); import inutilizzati rimossi; configurazione `ruff.toml`. Nessun cambiamento di comportamento: pytest senza avvisi |
 | 09/10/2026 | **—** | **Nuovo `GET /admin/bookings/planning`** (endpoint 18): camere e soggiorni che le occupano in una finestra di al massimo 62 giorni (`planning_max_window_days`), passato compreso, senza email né telefono. Stessa regola di occupazione della disponibilità. Nuovo `BookingPlanningService` (sola lettura, composto da `build_planning_service`). +14 test |

@@ -133,11 +133,7 @@ class TestLiveGatewayResponses:
 
 
     async def test_il_pagamento_accetta_solo_carte(self):
-        """
-        I metodi li decide il codice, non il cruscotto: con i metodi
-        automatici comparivano Klarna, Amazon Pay e Satispay, che portano
-        l'ospite fuori dal sito e non sono mai stati collaudati.
-        """
+        """I metodi li decide il codice, non il cruscotto Stripe."""
         stripe = _FakeStripe(_intent())
 
         await LiveStripeGateway(stripe_module=stripe).create_payment_intent(

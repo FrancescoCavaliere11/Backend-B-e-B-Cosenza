@@ -130,11 +130,11 @@ class TestCreate:
         assert booking["user_id"] is None
 
     async def test_telefono_straniero_salvato_in_formato_internazionale(self, admin_client, rooms):
-        """Debito #32: un ospite inglese si registra, e il numero si salva in E.164."""
-        guest = {**GUEST, "phone_number": "+44 20 7946 0958"}
+        """Un cellulare francese (9 cifre) si salva in E.164."""
+        guest = {**GUEST, "phone_number": "+33 6 12 34 56 78"}
         booking = await _create_booking(admin_client, [rooms[0].id], guest=guest)
 
-        assert booking["guest_phone"] == "+442079460958"
+        assert booking["guest_phone"] == "+33612345678"
 
     async def test_telefono_italiano_senza_prefisso_riceve_il_39(self, admin_client, rooms):
         booking = await _create_booking(admin_client, [rooms[0].id])

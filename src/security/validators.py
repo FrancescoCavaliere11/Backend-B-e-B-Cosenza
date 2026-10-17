@@ -5,6 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import magic
+import phonenumbers
 
 from fastapi import UploadFile
 
@@ -66,42 +67,36 @@ def validate_phone_number(value: str):
     return value
 
 
-#: Prefisso aggiunto ai numeri scritti senza: la struttura è in Italia, e i
-#: numeri a 10 cifre già in uso devono restare validi.
 DEFAULT_PHONE_COUNTRY_CODE = "+39"
 
-#: Formato E.164: «+», prefisso internazionale e numero, al massimo 15 cifre.
-_E164 = re.compile(r"^\+[1-9]\d{6,14}$")
-
-#: Separatori tollerati nella scrittura di un numero.
 _PHONE_SEPARATORS = re.compile(r"[\s\-./()]")
 
-#: Cellulare italiano: inizia con 3 e ha 10 cifre. Solo cellulari (decisione
-#: del 10/10/2026): fissi e vecchi cellulari a 9 cifre sono rifiutati.
-_ITALIAN_MOBILE = re.compile(r"^\+393\d{9}$")
+_PHONE_SHAPE = re.compile(r"^\+\d+$")
+
+#: `FIXED_LINE_OR_MOBILE`: Paesi (es. Stati Uniti) in cui i due formati coincidono.
+_MOBILE_TYPES = frozenset({
+    phonenumbers.PhoneNumberType.MOBILE,
+    phonenumbers.PhoneNumberType.FIXED_LINE_OR_MOBILE,
+})
+
+
+def _mobile_example(number: phonenumbers.PhoneNumber) -> str:
+    """Suffisso «. Esempio: +33 6 12 34 56 78» per il messaggio d'errore; vuoto se non disponibile."""
+    region = phonenumbers.region_code_for_country_code(number.country_code)
+    example = phonenumbers.example_number_for_type(region, phonenumbers.PhoneNumberType.MOBILE)
+    if example is None:
+        return ""
+    formatted = phonenumbers.format_number(example, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+    return f". Esempio: {formatted}"
 
 
 def validate_international_phone(value: str) -> str:
     """
-    Valida un numero di telefono e lo restituisce **normalizzato** in formato
-    internazionale E.164 (`+393331234567`), il formato salvato a database.
+    Valida un cellulare di qualunque Paese e lo restituisce in E.164.
 
-    Accetta come lo scrive una persona:
+    Tollera separatori e `00` al posto di `+`; senza prefisso assume l'Italia.
 
-    - spazi, trattini, punti, barre e parentesi (`+1 (212) 555-0100`);
-    - `00` al posto di `+` (`0044 20 7946 0958`);
-    - nessun prefisso: si assume l'Italia (`3331234567` → `+393331234567`).
-
-    Per l'**Italia** accetta solo cellulari: `+39`, poi `3` e altre nove
-    cifre. Per gli altri Paesi solo la forma: da qui non si può sapere dove
-    finisce il prefisso, quindi la lunghezza del numero nazionale (10 cifre)
-    la controlla il form.
-
-    TODO(#40): regole per Paese — lunghezze reali e «solo cellulare» — con la
-    libreria `phonenumbers`. Oggi un cellulare francese (9 cifre) o tedesco a
-    11 cifre non passa dal form.
-
-    :raises ValueError: con un messaggio in italiano, se il numero non è valido.
+    :raises ValueError: messaggio in italiano se il numero non è un cellulare valido.
     """
     raw = (value or "").strip()
     if not raw:
@@ -110,25 +105,31 @@ def validate_international_phone(value: str) -> str:
     compact = _PHONE_SEPARATORS.sub("", raw)
     if compact.startswith("00"):
         compact = "+" + compact[2:]
+    if not compact.startswith("+"):
+        compact = DEFAULT_PHONE_COUNTRY_CODE + compact
 
-    if compact.startswith("+"):
-        digits = compact[1:]
-        normalized = compact
-    else:
-        digits = compact
-        normalized = DEFAULT_PHONE_COUNTRY_CODE + compact
-
-    if not digits.isdigit():
+    if not _PHONE_SHAPE.match(compact):
         raise ValueError(
             "Il numero di telefono può contenere solo cifre, il «+» iniziale e separatori come spazi o trattini"
         )
-    if not _E164.match(normalized):
+
+    try:
+        number = phonenumbers.parse(compact, None)
+    except phonenumbers.NumberParseException:
         raise ValueError(
-            "Numero di telefono non valido: indica prefisso internazionale e numero, al massimo 15 cifre"
+            "Numero di telefono non valido: indica prefisso internazionale e numero"
+        ) from None
+
+    prefix = f"+{number.country_code}"
+    if not phonenumbers.is_valid_number(number):
+        raise ValueError(
+            f"Numero di cellulare non valido per il prefisso {prefix}{_mobile_example(number)}"
         )
-    if normalized.startswith(DEFAULT_PHONE_COUNTRY_CODE) and not _ITALIAN_MOBILE.match(normalized):
-        raise ValueError("Per l'Italia serve un numero di cellulare: inizia con 3 e ha 10 cifre")
-    return normalized
+    if phonenumbers.number_type(number) not in _MOBILE_TYPES:
+        raise ValueError(
+            f"Serve un numero di cellulare, non un fisso{_mobile_example(number)}"
+        )
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
 
 
 def validate_password_strength(value: str):

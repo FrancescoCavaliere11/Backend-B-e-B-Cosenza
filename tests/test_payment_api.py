@@ -708,10 +708,7 @@ async def test_il_pagamento_online_lascia_le_sue_voci_nello_storico(
 async def test_la_carta_compare_nella_scheda_admin_e_non_all_ospite(
         api_client, admin_client, rooms, stripe_gateway
 ):
-    """
-    Circuito e ultime cifre sono per il back-office: la scheda admin li
-    mostra, la ricerca pubblica dell'ospite no.
-    """
+    """La carta compare nella scheda admin, non nella ricerca pubblica."""
     prenotazione = await _crea_prenotazione_da_pagare(api_client, rooms[0].id)
     await _avvia_pagamento(api_client, prenotazione["code"])
     intent_id = list(stripe_gateway.intents)[0]
